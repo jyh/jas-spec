@@ -224,38 +224,6 @@ public enum LayersPanel {
         return ctx
     }
 
-    /// A key on the focused Layers tree, through layers.yaml's `keyboard:` rows
-    /// (STATUS-jas item 8 class L, step 2b): the chord resolves in the action
-    /// context (``resolvePanelKey``) and the row's action is dispatched. false
-    /// when no row binds the chord, so the caller lets the key pass. Mirrors Rust
-    /// `layers_tree_key`.
-    @discardableResult
-    public static func treeKey(_ chord: KeyChord, model: Model,
-                               onCloseDialog: (() -> Void)? = nil) -> Bool {
-        guard let ws = WorkspaceData.load(),
-              let panel = (ws.data["panels"] as? [String: Any])?["layers_panel_content"] else { return false }
-        let ctx = actionContext(model: model, ws: ws, panelSelection: [],
-                                artboardsPanelSelection: [], params: [:])
-        guard let cmd = resolvePanelKey(panel, chord: chord, context: ctx) else { return false }
-        dispatchYamlAction(cmd.action, model: model, params: cmd.params, onCloseDialog: onCloseDialog)
-        // The rows' panel writes (`list_toggle` of collapsed_paths, the
-        // selection, renaming_element) publish nothing; the tree draws from the
-        // store, so it redraws on this.
-        model.panelStateVersion &+= 1
-        return true
-    }
-
-    /// The tree's eye button (STATUS-jas item 8): Option-click runs
-    /// `solo_element_visibility` (the siblings' saved visibilities live in the
-    /// panel's `solo_path` / `solo_saved`), a plain click runs
-    /// `cycle_element_visibility`, which also discards a pending solo. Mirrors
-    /// the web tree's eye.
-    public static func eyeClick(path: [Int], option: Bool, model: Model) {
-        dispatchYamlAction(option ? "solo_element_visibility" : "cycle_element_visibility",
-                           model: model, params: ["path": ["__path__": path]])
-        model.panelStateVersion &+= 1
-    }
-
     /// Build the LayersPanel platform-effect registry and run `effects` through
     /// the shared `runEffects` pipeline, naming the owning transaction
     /// `actionName` (OP_LOG.md §9). Extracted from ``dispatchYamlAction`` so the
