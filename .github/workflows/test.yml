@@ -176,7 +176,12 @@ jobs:
       # parsed the row LABEL, so naming an element exempted it from the filter
       # -- correct the day it was written, broken by the later commit that let
       # every element carry a name. Reds on that historical block.
-      - run: python scripts/check_layers_type_filter.py --self-test && python scripts/check_layers_type_filter.py
+      # jas-spec: the Mac shell's Layers type-filter realisation is EXCISED on this
+      # fork (the synthesis is blinded to it), so the source-shape run has no
+      # subject until the synthesised realisation lands. The self-test still runs;
+      # the behavioural check of the same property is the Layers S2 search +
+      # type-filter input scripts, which run on both builds.
+      - run: python scripts/check_layers_type_filter.py --self-test && echo "SKIPPED on jas-spec -- check_layers_type_filter.py source run, its subject is excised, behaviour is checked by the Layers S2 type-filter scripts"
       # Every log-only action must say which port implements it natively, and the
       # two must AGREE. Found 8 one-port divergences on its first run, including
       # File>Save As doing nothing in jas_dioxus. Its self-test anchors are
@@ -1056,7 +1061,8 @@ jobs:
           python scripts/check_ffi_counter_lock.py --self-test
           python scripts/check_ffi_counter_lock.py
           python scripts/check_layers_type_filter.py --self-test
-          python scripts/check_layers_type_filter.py
+          # jas-spec: the source run is skipped by name (its subject is excised; see the Linux job)
+          echo "SKIPPED on jas-spec -- check_layers_type_filter.py source run, its subject is excised, behaviour is checked by the Layers S2 type-filter scripts"
           python scripts/check_action_implementations.py --self-test
           python scripts/check_action_implementations.py
           python scripts/check_path_keying.py --self-test
