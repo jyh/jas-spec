@@ -124,9 +124,8 @@ public enum LayersPanel {
 
     /// The evaluation context a Layers YAML action runs in: the active
     /// document view, the `panel` dict (selections, isolation stack, the tree's
-    /// binds), `param`, `state` and `preferences`. Shared by
-    /// ``dispatchYamlAction`` and ``treeKey``, so a key resolves in the scope its
-    /// action then runs in (Rust's `build_appstate_ctx`).
+    /// binds), `param`, `state` and `preferences`. Used by ``dispatchYamlAction``
+    /// (Rust's `build_appstate_ctx`).
     static func actionContext(model: Model, ws: WorkspaceData,
                               panelSelection: [[Int]], artboardsPanelSelection: [String],
                               params: [String: Any]) -> [String: Any] {

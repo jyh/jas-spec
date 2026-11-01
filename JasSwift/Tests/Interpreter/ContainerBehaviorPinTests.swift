@@ -30,8 +30,8 @@ import Foundation
 /// (single → `handleWidgetClick`, double → `handleBehaviorClick`),
 /// `renderIconButton` / `renderButton` / `renderToggle` via a SwiftUI
 /// `Button` / `Toggle`, `renderColorSwatch` / `renderGradientTile` /
-/// `renderGradientSlider` via `.onTapGesture`, and `renderTreeView` via the
-/// native Layers tree. If you give a NEW widget type a click behavior in the
+/// `renderGradientSlider` via `.onTapGesture`, and `renderTreeView` (the `tree_view`
+/// arm). If you give a NEW widget type a click behavior in the
 /// YAML you MUST both wire its tap in the render arm and register it here, or
 /// `everyClickBearingWidgetTypeIsPointerWired` fails.
 ///

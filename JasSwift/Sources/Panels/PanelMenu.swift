@@ -327,11 +327,7 @@ public func panelMenuContext(_ contentId: String, layout: WorkspaceLayout,
 /// `layers_panel_content` — the ONE name for it since 2026-09-05; the panel's
 /// file alone had spelled it `panel_selection`).
 ///
-/// `TreeViewContent` reads and writes the selection here (since 2026-10-28; it
-/// was view-lived `@State` mirrored one way before that). Before the mirror
-/// existed nothing outside that view could read it, so
-/// `active_document.layers_panel_selection_count` was 0 in every context this
-/// app built. One store value for the tree, the keys and the menus now.
+/// One store value for the tree, the keys and the menus.
 func layersPanelSelection(model: Model?) -> [[Int]] {
     guard let store = model?.stateStore,
           let raw = store.getPanel("layers_panel_content", "layers_panel_selection") as? [Any]

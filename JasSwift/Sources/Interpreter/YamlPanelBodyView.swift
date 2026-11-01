@@ -312,23 +312,6 @@ struct YamlElementView: View {
             // Two of the three previously-undispatched kinds. `dropdown` stays
             // absent — see scripts/widget_dispatch_exemptions.json for the row
             // and its machine-checked justification.
-            //
-            // AN EARLIER VERSION OF THIS COMMENT WAS WRONG, and the way it was
-            // wrong is worth keeping: it said the Layers element-type filter
-            // "needs native state and tree filtering", implying this port had
-            // neither. It has both, and has for months — `hiddenTypes`,
-            // `layersTypeValue`, `layersTypeFilterKeep`. The false clause came
-            // from the exemption row, was copied here, and then the two agreed
-            // with each other; a seat read them and set out to build what
-            // already shipped. Consensus among copies is not evidence.
-            //
-            // The real gap: this port draws the search field and the filter
-            // menu NATIVELY inside `renderTreeView`, which `layers.yaml`
-            // already declares as `lp_search_input` + `lp_filter_button`. So
-            // the artist gets the search box twice and two filter controls, the
-            // YAML one an inert placeholder. jas_dioxus renders both from the
-            // YAML and duplicates neither. Adding an arm here alone would give
-            // a THIRD control; the fix is to delete the native pair.
             case "dropdown":
                 renderDropdown()
             case "icon_button_group":
@@ -2697,12 +2680,7 @@ struct YamlElementView: View {
     /// A `dropdown` widget: a menu of toggle items over one panel-state list,
     /// rendered from the YAML's own `items` (council Q3.2, 2026-07-30).
     ///
-    /// GENERIC, and that is the point. This port drew the Layers type filter as
-    /// a hardcoded eleven-pair SwiftUI `Menu` inside `renderTreeView`, while
-    /// `layers.yaml` declared the same eleven as `lp_filter_button.items` and
-    /// this dispatch fell through to a grey `[Filter by element type]`
-    /// placeholder beside it. Adding a type to the YAML would have appeared in
-    /// jas_dioxus and silently not here.
+    /// GENERIC: every item comes from the YAML; no item list is hardcoded here.
     ///
     /// CHECKED SEMANTICS: a ticked item means "list this type". Nothing ticked
     /// is the default and means everything, so the "All" row carries the tick
