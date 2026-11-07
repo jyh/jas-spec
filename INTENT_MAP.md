@@ -7,7 +7,7 @@
 ## Scope -- read this first
 
 **This map covers the ACTION seam (`dispatch_action`) ONLY**: the
-244 actions in the workspace bundle's `actions` map, plus the
+245 actions in the workspace bundle's `actions` map, plus the
 bundle's declared `native_intercepts`. It is the machine enumeration
 of which actions journal through `op_apply` (the enumeration
 OP_LOG.md's actions.yaml<->op_apply unification prose refers to).
@@ -38,18 +38,18 @@ verb list is in `intent_map.json` under
 | class | actions |
 |---|---|
 | `doc-direct` | 5 |
-| `journaling` | 60 |
+| `journaling` | 61 |
 | `native-intercept` | 1 |
 | `preview` | 3 |
 | `tool-lifecycle` | 1 |
 | `ui-state` | 169 |
 | `view` | 6 |
-| **total** | **245** |
+| **total** | **246** |
 
-(The bundle's `actions` map has 244 entries; `native-intercept` entries
+(The bundle's `actions` map has 245 entries; `native-intercept` entries
 come additively from `native_intercepts`.)
 
-## Journaling actions (60)
+## Journaling actions (61)
 
 | action | doc.* verbs reached |
 |---|---|
@@ -86,6 +86,7 @@ come additively from `native_intercepts`.)
 | `make_instance` | `doc.make_instance` |
 | `move_artboard_down` | `doc.move_artboards_down` |
 | `move_artboard_up` | `doc.move_artboards_up` |
+| `move_elements` | `doc.op` |
 | `new_artboard` | `doc.create_artboard` |
 | `new_group` | `doc.wrap_in_group` |
 | `new_layer` | `doc.create_layer`, `doc.insert_at` |
