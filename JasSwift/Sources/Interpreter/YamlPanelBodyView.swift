@@ -2464,10 +2464,20 @@ struct YamlElementView: View {
         }
     }
 
-    // MARK: - Tree View (excised in jas-spec, O96: a stub so the dispatch line has a target)
+    // MARK: - Tree View
 
+    /// The Layers tree (slice S1): a native view over the core's rows, drawn
+    /// from the node's `do:` template (Interpreter/LayersTreeView.swift; the
+    /// press, key and reveal rules are Panels/LayersTree.swift). Without a
+    /// model there is no document to list.
+    @ViewBuilder
     private func renderTreeView() -> some View {
-        SwiftUI.Text("[tree_view]").foregroundColor(.gray)
+        if let model = model {
+            LayersTreeView(element: element, context: context, model: model, theme: theme)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            EmptyView()
+        }
     }
 
     // MARK: - Element Preview
