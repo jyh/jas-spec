@@ -1959,6 +1959,41 @@ actions:
       # Panel state only: the path joins or leaves collapsed_paths.
       - list_toggle: { target: "panel.collapsed_paths", value: "param.path", panel: layers }
 
+  move_elements:
+    description: >
+      Move the panel-selected elements, as one undo step, to position
+      `index` under `target_parent`. The elements leave their places and are inserted in
+      their original document order. `index` counts the parent's children
+      in document (z) order, 0 = the bottom child, AFTER the moved elements
+      are removed; the shell converts from row position (the tree draws
+      topmost first). No existing op does this: doc.insert_at, doc.delete_at
+      and doc.clone_at do not compose into one atomic step that shifts
+      stored paths. Valid only if, for every moved element, the parent is
+      not the element or inside it, the parent is not locked (its own flag
+      or any ancestor's), a layer goes to the root or a layer and anything
+      else to a layer or a group, no search or type filter is active, and
+      in isolation the parent is the isolated container or inside it; if
+      any element fails, the op refuses by name and nothing moves. The op's
+      check is the one authority: the shell's drop_valid is computed by
+      calling it. Locked elements may be moved (lock protects content, not
+      position). After the move the panel selection is the moved elements'
+      new paths, and every path stored in the Layers panel's state is
+      remapped through the move: all of collapsed_paths (later siblings and
+      their descendants shift too), isolation_stack, solo_path and
+      renaming_element.
+    category: layers
+    tier: 3
+    params:
+      target_parent: { type: path, description: "The new parent; [] is the document root." }
+      index: { type: number, description: "Insertion index under target_parent in document (z) order, 0 = bottom, after removal." }
+    effects:
+      # One undo step through the op layer. move_elements is a NEW engine op
+      # (no existing op moves an element between parents).
+      - snapshot
+      # The moved elements are the panel selection, read here as new_group
+      # and wrap_in_layer read it (no list-typed param exists).
+      - doc.op: { op: move_elements, paths: "panel.layers_panel_selection", target_parent: "param.target_parent", index: "param.index" }
+
   # Isolation mode
 
   enter_isolation_mode:
