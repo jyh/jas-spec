@@ -661,6 +661,9 @@ content:
             description: "Show drop indicator; auto-expand after 500ms hover on collapsed container"
           - event: drag_end
             description: "Validate constraints and reparent/reorder elements"
+            condition: "event.drop_valid"
+            action: move_elements
+            params: { paths: "panel.layers_panel_selection", target_parent: "event.drop_parent", index: "event.drop_index" }
         children:
 
           # Indentation spacer

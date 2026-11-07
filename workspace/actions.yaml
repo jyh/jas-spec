@@ -1959,6 +1959,32 @@ actions:
       # Panel state only: the path joins or leaves collapsed_paths.
       - list_toggle: { target: "panel.collapsed_paths", value: "param.path", panel: layers }
 
+  move_elements:
+    description: >
+      Move the given elements, as one undo step, to position `index` under
+      `target_parent`. The elements leave their places and are inserted in
+      their original document order; `index` counts the parent's children
+      AFTER the moved elements are removed. Valid only if, for every moved
+      element, the parent is not the element or inside it, the parent is not
+      locked (its own flag or any ancestor's), a layer goes to the root or a
+      layer and anything else to a layer or a group, no search or type
+      filter is active, and in isolation the parent is the isolated
+      container or inside it; if any element fails, nothing moves. Locked
+      elements may be moved (lock protects content, not position). After
+      the move the panel selection is the moved elements' new paths, and
+      collapsed_paths entries that named moved containers move with them.
+    category: layers
+    tier: 3
+    params:
+      paths: { type: list, description: "The elements to move (element paths), in any order." }
+      target_parent: { type: path, description: "The new parent; [] is the document root." }
+      index: { type: number, description: "Insertion index under target_parent, after removal." }
+    effects:
+      # One undo step through the op layer. move_elements is a NEW engine op
+      # (no existing op moves an element between parents).
+      - snapshot
+      - doc.op: { op: move_elements, paths: "param.paths", target_parent: "param.target_parent", index: "param.index" }
+
   # Isolation mode
 
   enter_isolation_mode:
