@@ -531,6 +531,12 @@
         "doc.move_artboards_up"
       ]
     },
+    "move_elements": {
+      "class": "journaling",
+      "doc_verbs": [
+        "doc.op"
+      ]
+    },
     "new_artboard": {
       "class": "journaling",
       "doc_verbs": [
@@ -1286,7 +1292,7 @@
     ],
     "by_class": {
       "doc-direct": 5,
-      "journaling": 60,
+      "journaling": 61,
       "native-intercept": 1,
       "preview": 3,
       "tool-lifecycle": 1,
@@ -1340,11 +1346,11 @@
       "doc.zoom.scrubby",
       "doc.zoom.set_full"
     ],
-    "journaling_actions": 60,
+    "journaling_actions": 61,
     "native_intercepts": [
       "export_to_pdf"
     ],
-    "total_actions": 244,
+    "total_actions": 245,
     "verb_table": {
       "always": [
         "doc.apply_concept_operation",
