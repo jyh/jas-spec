@@ -512,7 +512,10 @@ content:
           behavior:
             - event: input
               action: set_layers_search
-              params: { query: "panel.search_query" }
+              # event.value is the field's whole text after the change; an
+              # input writes no bind, so panel.search_query would read the
+              # OLD query (WIDGET_EVENTS.md, "Typing in a text field").
+              params: { query: "event.value" }
         - id: lp_filter_button
           type: dropdown
           icon: filter
