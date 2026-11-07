@@ -666,7 +666,7 @@ content:
             description: "Validate constraints and reparent/reorder elements"
             condition: "event.drop_valid"
             action: move_elements
-            params: { paths: "panel.layers_panel_selection", target_parent: "event.drop_parent", index: "event.drop_index" }
+            params: { target_parent: "event.drop_parent", index: "event.drop_index" }
         children:
 
           # Indentation spacer
