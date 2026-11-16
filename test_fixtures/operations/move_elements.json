@@ -37,5 +37,20 @@
       {"name": "move_elements", "ops": [{"op": "move_elements", "paths": [], "target_parent": [0], "index": 0}]}
     ],
     "expected_json": "lock_toggle_noop_expected.json"
+  },
+  {
+    "_doc": [
+      "ERRATUM 3 (decision S2-15): the paths are first REDUCED TO THEIR ROOTS. Here they hold the group `cluster` [0,1]",
+      "AND its own child `beta` [0,1,1] (given descendant first). `beta` is not a root: it is never checked or placed",
+      "under the target on its own, and travels inside `cluster` at its unchanged path within it. The one root goes",
+      "to the bottom of the layer (index 0 after removal, counting only the layer's NON-moved children), so the",
+      "layer is [cluster[alpha, beta], solo]. Without the reduction `beta` would leave the group and land beside it."
+    ],
+    "name": "moving_an_element_with_its_descendant_moves_only_the_root",
+    "setup_svg": "group_solo_and_cluster.svg",
+    "txns": [
+      {"name": "move_elements", "ops": [{"op": "move_elements", "paths": [[0, 1, 1], [0, 1]], "target_parent": [0], "index": 0}]}
+    ],
+    "expected_json": "move_elements_an_element_with_its_descendant_expected.json"
   }
 ]
