@@ -1,7 +1,10 @@
 //! `move_elements(paths, target_parent, index)` — the Layers panel's drop
 //! (LAYERS-S2 interaction spec §3, `workspace/actions.yaml` §move_elements).
 //!
-//! The dragged elements leave their places and are inserted, in their original
+//! The dragged set is first REDUCED TO ITS ROOTS (ERRATUM 3, DECISION S2-15):
+//! a path whose proper ancestor is also dragged travels inside that ancestor,
+//! its path within it unchanged, and is never checked or placed on its own.
+//! The roots leave their places and are inserted, in their original
 //! DOCUMENT order, at `index` under `target_parent`. `index` counts the
 //! parent's children in document (z) order, 0 = the bottom child, and is read
 //! AFTER the dragged elements are removed (DECISION S2-14). `[]` as the target
@@ -27,8 +30,8 @@ use crate::document::document::{Document, ElementPath, ElementSelection};
 use crate::geometry::element::Element;
 
 /// Why a drop is refused: the five validity rules, by name (spec §3, ERRATUM 1).
-/// The check returns the FIRST failure: the dragged elements are taken in
-/// document order and, for each, rules 1–5 in the order listed.
+/// The check returns the FIRST failure: the dragged set's ROOTS (ERRATUM 3)
+/// are taken in document order and, for each, rules 1–5 in the order listed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MoveRefusal {
     /// Rule 1: the target parent is a dragged element or inside one.
@@ -91,8 +94,9 @@ pub struct MoveContext {
 /// A validated move, computed against the PRE-move document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MovePlan {
-    /// The dragged elements' pre-move paths, sorted into document order, with
-    /// any path inside another dragged path dropped (it rides along).
+    /// The dragged set's ROOTS (ERRATUM 3): pre-move paths in document order,
+    /// with any path inside another dragged path dropped (it travels inside
+    /// its root, and [`MovePlan::remap`] still follows it).
     pub moved: Vec<ElementPath>,
     /// The target parent's pre-move path (`[]` = root).
     pub parent: ElementPath,
@@ -105,12 +109,13 @@ pub struct MovePlan {
 /// Validate and plan a move. The one authority for the five rules.
 ///
 /// Checks, in order: an empty `paths` ⇒ [`MoveError::NothingToMove`] (a
-/// no-op); every path and the parent resolve ⇒ else
-/// [`MoveError::MissingTarget`]; every dragged path is a tree row; then, for
-/// every dragged element in document order, rules 1–5 in the order listed,
-/// returning the FIRST failure ([`MoveError::Refused`], whose
-/// [`MoveRefusal::name`] is the spec's name); finally `index` is within the
-/// parent's children after removal.
+/// no-op); every given path (root or not) and the parent resolve ⇒ else
+/// [`MoveError::MissingTarget`]; every given path is a tree row; the paths
+/// are REDUCED TO THEIR ROOTS (ERRATUM 3, [`roots_in_document_order`]); then,
+/// for every ROOT in document order, rules 1–5 in the order listed, returning
+/// the FIRST failure ([`MoveError::Refused`], whose [`MoveRefusal::name`] is
+/// the spec's name) — a non-root is never checked; finally `index` is within
+/// the parent's NON-moved children (after removal).
 pub fn plan_move(
     doc: &Document,
     paths: &[ElementPath],
@@ -121,8 +126,10 @@ pub fn plan_move(
     if paths.is_empty() {
         return Err(MoveError::NothingToMove);
     }
-    let moved = normalize(paths);
-    for p in &moved {
+    // Every GIVEN path must name a Layers-tree row, a non-root as much as a
+    // root: a missing element stays an error (spec §3). Only the five rules
+    // are confined to the roots (ERRATUM 3).
+    for p in paths.iter().filter(|p| !p.is_empty()) {
         if doc.get_element(p).is_none() {
             return Err(MoveError::MissingTarget(p.clone()));
         }
@@ -134,6 +141,11 @@ pub fn plan_move(
             }
         }
     }
+    // ERRATUM 3: reduce the dragged set to its ROOTS, in document order. A
+    // path whose proper ancestor is also dragged is dropped here: it is never
+    // checked against the rules and never placed under the target on its
+    // own; it travels inside its root, its path within the root unchanged.
+    let moved = roots_in_document_order(paths);
     let parent_elem = if target_parent.is_empty() {
         None
     } else {
@@ -205,10 +217,12 @@ pub fn drop_valid(
     plan_move(doc, paths, target_parent, index, ctx).is_ok()
 }
 
-/// Sort into document order, dedupe, and drop any path inside another one
-/// (a descendant moves with its dragged ancestor). Empty paths are dropped:
-/// the root is not an element.
-fn normalize(paths: &[ElementPath]) -> Vec<ElementPath> {
+/// ERRATUM 3: the dragged set REDUCED TO ITS ROOTS, in document order. Sort
+/// into document order (lexicographic on index paths = pre-order, so an
+/// ancestor precedes its descendants), dedupe, and drop any path whose proper
+/// ancestor is also dragged (it travels inside that ancestor). Empty paths
+/// are dropped: the root is not an element.
+pub fn roots_in_document_order(paths: &[ElementPath]) -> Vec<ElementPath> {
     let mut sorted: Vec<ElementPath> = paths.iter().filter(|p| !p.is_empty()).cloned().collect();
     sorted.sort();
     sorted.dedup();
@@ -784,6 +798,100 @@ mod tests {
         let out = plan.apply(&d);
         assert_eq!(tree(&out), "L1[a d] L2[e G[b c]]");
         assert_eq!(plan.remap(&[0, 1, 0]), vec![1, 1, 0]);
+    }
+
+    /// ERRATUM 3: the rules are checked for the ROOTS only. L1 with its own
+    /// leaf `a` to the root: `a` alone would fail rule 3 (a leaf never goes
+    /// to the root), but it is not a root, so it is never checked and the
+    /// drop is valid; `a` stays inside L1.
+    #[test]
+    fn a_non_root_is_never_checked_against_the_rules() {
+        let d = doc();
+        let none = MoveContext::default();
+        assert_eq!(plan_move(&d, &[vec![0, 0]], &vec![], 0, &none),
+                   Err(MoveError::Refused(MoveRefusal::WrongParentKind)), "alone, `a` is refused");
+        let mut m = model_of(doc());
+        mv(&mut m, json!([[0, 0], [0]]), json!([]), 1).unwrap();
+        assert_eq!(tree(m.document()), "L2[e] L1[a G[b c] d]");
+    }
+
+    /// ERRATUM 3: the first failure is a ROOT's. L1 (with its child G's leaf
+    /// `b`) into G: the root L1 fails rule 1 and that name is returned.
+    #[test]
+    fn the_first_failure_is_a_roots() {
+        let d = doc();
+        assert_eq!(plan_move(&d, &[vec![0, 1, 0], vec![0]], &vec![0, 1], 0, &MoveContext::default()),
+                   Err(MoveError::Refused(MoveRefusal::IntoItselfOrDescendant)));
+    }
+
+    /// ERRATUM 3: `index` counts the target parent's children that are NOT
+    /// being moved; a non-root inside a moved root is not one of them.
+    #[test]
+    fn the_index_counts_the_parents_non_moved_children() {
+        let d = doc();
+        let none = MoveContext::default();
+        // G and its own `c` within L1: L1's non-moved children are a and d.
+        let plan = plan_move(&d, &[vec![0, 1], vec![0, 1, 1]], &vec![0], 2, &none).unwrap();
+        assert_eq!(tree(&plan.apply(&d)), "L1[a d G[b c]] L2[e]");
+        assert_eq!(plan_move(&d, &[vec![0, 1], vec![0, 1, 1]], &vec![0], 3, &none),
+                   Err(MoveError::IndexOutOfRange));
+    }
+
+    /// ERRATUM 3: roots go in DOCUMENT order whatever order the paths are
+    /// given in, and every selected element — roots and the descendants that
+    /// travelled inside them — is followed by identity.
+    #[test]
+    fn roots_keep_document_order_and_every_selected_element_is_followed() {
+        let d = doc();
+        let given = [vec![0, 1, 1], vec![0, 1], vec![0, 0]];
+        let plan = plan_move(&d, &given, &vec![1], 1, &MoveContext::default()).unwrap();
+        assert_eq!(plan.moved, vec![vec![0, 0], vec![0, 1]]);
+        let out = plan.apply(&d);
+        assert_eq!(tree(&out), "L1[d] L2[e a G[b c]]");
+        for p in &given {
+            assert_eq!(name_at(&out, &plan.remap(p)), name_at(&d, p), "{p:?}");
+        }
+        assert_eq!(plan.remap(&[0, 1, 1]), vec![1, 2, 1], "`c` keeps its path within G");
+    }
+
+    /// A missing element stays an error (spec §3), a non-root as much as a
+    /// root: the reduction confines the RULES to the roots, not the operand
+    /// check.
+    #[test]
+    fn a_missing_non_root_is_still_a_missing_target() {
+        let d = doc();
+        assert_eq!(plan_move(&d, &[vec![0, 1], vec![0, 1, 9]], &vec![1], 0, &MoveContext::default()),
+                   Err(MoveError::MissingTarget(vec![0, 1, 9])));
+    }
+
+    /// ERRATUM 3 through the `doc.op` effect: the panel selection becomes the
+    /// new paths of EVERY selected element, the descendant included.
+    #[test]
+    fn the_panel_selection_follows_a_root_and_its_selected_descendant() {
+        use crate::interpreter::effects::run_effects;
+        use crate::interpreter::state_store::StateStore;
+        let mut scope = std::collections::HashMap::new();
+        scope.insert("search_query".to_string(), json!(""));
+        scope.insert("type_filter".to_string(), json!([]));
+        scope.insert("isolation_stack".to_string(), json!([]));
+        scope.insert("layers_panel_selection".to_string(),
+                     json!([{"__path__": [0, 1]}, {"__path__": [0, 1, 0]}]));
+        scope.insert("collapsed_paths".to_string(), json!([]));
+        scope.insert("renaming_element".to_string(), json!(null));
+        scope.insert("solo_path".to_string(), json!(null));
+        scope.insert("solo_saved".to_string(), json!([]));
+        let mut store = StateStore::new();
+        store.init_panel("layers", scope);
+        let effect = json!({"doc.op": {"op": "move_elements", "paths": "param.paths",
+                                       "target_parent": "param.target_parent", "index": "param.index"}});
+        let ctx = json!({"param": {"paths": [{"__path__": [0, 1]}, {"__path__": [0, 1, 0]}],
+                                   "target_parent": {"__path__": [1]}, "index": 1}});
+        let mut m = model_of(doc());
+        let report = run_effects(&[effect], &ctx, &mut store, Some(&mut m), None, None, None);
+        assert!(report.unhandled.is_empty(), "{:?}", report.unhandled);
+        assert_eq!(tree(m.document()), "L1[a d] L2[e G[b c]]");
+        assert_eq!(store.get_panel("layers", "layers_panel_selection"),
+                   &json!([{"__path__": [1, 1]}, {"__path__": [1, 1, 0]}]));
     }
 
     #[test]

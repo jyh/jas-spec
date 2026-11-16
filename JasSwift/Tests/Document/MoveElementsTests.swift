@@ -317,6 +317,65 @@ import Foundation
         #expect(m.document.layers == Self.doc().layers)
     }
 
+    // MARK: - ERRATUM 3: the dragged set is reduced to its roots (S2-15)
+
+    @Test func aNonRootIsNeverChecked() {
+        // The layer [1] may go to the root; its child [1,0], a leaf, would fail
+        // rule 3 there on its own. It is not a root, so it is never checked.
+        #expect(Self.check(Self.doc(), [[1, 0], [1]], []) == nil)
+        // The group [0,2] into layer 1 is valid; so is its child, but the
+        // reduction is what keeps the child inside the group (below).
+        #expect(Self.check(Self.doc(), [[0, 2, 0], [0, 2]], [1]) == nil)
+    }
+
+    @Test func theRootsAreCheckedAndTheFirstFailureNamed() {
+        // Roots [0,0] (leaf) and [1] (layer) into the group [0,2]: the layer
+        // fails rule 3; its own child [1,0] adds nothing to the check.
+        #expect(Self.check(Self.doc(), [[1, 0], [0, 0], [1]], [0, 2]) == .wrongParentKind)
+    }
+
+    @Test func aDescendantTravelsInsideItsAncestorNeverPlacedOnItsOwn() throws {
+        let out = try Self.moved(MoveElements.apply(Self.doc(), paths: [[0, 2, 0], [0, 2]],
+                                                    targetParent: [1], index: 0))
+        #expect(out.document.layers[1].children
+                == [.group(Group(children: [Self.rect(40)])), Self.rect(60)],
+                "the child stays inside the group, at its path within it")
+        #expect(out.document.layers[0].children == [Self.rect(0), Self.rect(20)])
+        #expect(out.moved == [[0, 2]], "only the root moves")
+        #expect(out.movedPaths == [[1, 0]])
+        #expect(out.remap([0, 2, 0]) == [1, 0, 0], "the descendant's path follows its root")
+    }
+
+    @Test func aLayerWithItsChildMovesAtTheRoot() throws {
+        let out = try Self.moved(MoveElements.apply(Self.doc(), paths: [[1, 0], [1]], targetParent: [], index: 0))
+        #expect(out.document.layers.map(\.name) == ["Layer 2", "Layer 1"])
+        #expect(out.document.layers[0].children == [Self.rect(60)])
+    }
+
+    @Test func theIndexCountsOnlyTheParentsNonMovedChildren() {
+        // L0 keeps r0 and r20 once the group leaves: 0...2 are in range, 3 is not.
+        // The group's child is no child of L0 and is not counted either way.
+        for i in 0...2 {
+            if case .failure = MoveElements.apply(Self.doc(), paths: [[0, 2], [0, 2, 0]],
+                                                  targetParent: [0], index: i) {
+                Issue.record("index \(i) should be in range")
+            }
+        }
+        #expect(Self.failure(MoveElements.apply(Self.doc(), paths: [[0, 2], [0, 2, 0]],
+                                                targetParent: [0], index: 3)) == .badIndex)
+    }
+
+    @Test func theSelectionBecomesEverySelectedElementsNewPath() {
+        let m = Self.model()
+        Self.setSelection(m, [[0, 2, 0], [0, 2]])
+        LayersPanel.dispatchYamlAction("move_elements", model: m,
+                                       params: ["target_parent": [1], "index": 1])
+        #expect(m.document.layers[1].children == [Self.rect(60), .group(Group(children: [Self.rect(40)]))])
+        #expect(m.journal.count == 1)
+        #expect(Set(layersPanelSelection(model: m)) == Set([[1, 1], [1, 1, 0]]),
+                "the root and the descendant that travelled inside it, each by identity")
+    }
+
     @Test func everyStoredPanelPathIsRemapped() {
         let m = Self.model()
         Self.setSelection(m, [[0, 0]])
