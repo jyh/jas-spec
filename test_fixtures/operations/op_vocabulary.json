@@ -44,6 +44,7 @@
     "move_artboards_down": "edit",
     "move_artboards_up": "edit",
     "move_by_ids": "edit",
+    "move_elements": "edit",
     "move_selection": "edit",
     "paste": "edit",
     "place_concept_instance": "edit",

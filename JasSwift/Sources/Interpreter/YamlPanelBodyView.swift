@@ -1422,11 +1422,21 @@ struct YamlElementView: View {
         // sees their typed characters disappear. Buffer in a local
         // @State and commit only on Enter / blur so the typed text
         // survives the round-trip.
+        // A field that declares an `input` behavior (the Layers search,
+        // LAYERS-S2 §2) raises it on EVERY keystroke with the whole text.
+        let declaresInput = ((element["behavior"] as? [[String: Any]]) ?? [])
+            .contains { $0["event"] as? String == "input" }
+        let element = self.element
+        let events = widgetEvents
+        let onInput: ((String) -> Void)? = declaresInput
+            ? { (text: String) -> Void in _ = events?.textEntry(element, event: "input", text: text) }
+            : nil
         BufferedTextField(
             placeholder: placeholder,
             externalValue: currentValue,
             // The text is the value, verbatim (WIDGET_EVENTS.md).
-            commit: { newVal in widgetEvents?.commit(element, text: newVal) }
+            commit: { newVal in widgetEvents?.commit(element, text: newVal) },
+            onInput: onInput
         )
             .textFieldStyle(.roundedBorder)
             // Text follows the window color scheme (see renderNumberInput):
@@ -2715,6 +2725,16 @@ struct YamlElementView: View {
         let route = PanelWidgetEvents(model: model, panelId: panelId, scope: context)
         let element = self.element
 
+        // LAYERS-S2 DECISION S2-6: the dropdown STAYS OPEN after a toggle (a
+        // checklist is ticked several times in a row) and closes on a press
+        // outside it or Escape — a transient popover, not a `Menu`, which
+        // closes on every pick. Same rows, same declared routes.
+        if element["id"] as? String == "lp_filter_button" {
+            return AnyView(LayersFilterDropdown(element: element, items: items, rows: rows,
+                                                panelId: panelId, model: model,
+                                                context: context, actions: actions))
+        }
+
         return AnyView(Menu {
             ForEach(rows.indices, id: \.self) { i in
                 let row = rows[i]
@@ -3477,6 +3497,8 @@ private struct BufferedTextField: View {
     let placeholder: String
     let externalValue: String
     let commit: (String) -> Void
+    /// Per-keystroke `input`, for a field that declares one; nil otherwise.
+    var onInput: ((String) -> Void)? = nil
     @State private var text: String = ""
     @State private var syncOnNextChange: Bool = false
     @FocusState private var focused: Bool
@@ -3485,6 +3507,11 @@ private struct BufferedTextField: View {
         TextField(placeholder, text: $text)
             .focused($focused)
             .onAppear { text = externalValue }
+            .onChange(of: text) { newValue in
+                // Only the person's typing raises `input`, never a sync
+                // from the bound value.
+                if focused, newValue != externalValue { onInput?(newValue) }
+            }
             .onChange(of: externalValue) { newValue in
                 // After a commit we always pull the post-commit
                 // (possibly transformed, e.g. Web Safe snap) value
@@ -3725,6 +3752,78 @@ func layersCheckedAfterAction(_ action: String, _ checked: Set<String>) -> Set<S
     // means everything is listed.
     case "clear_layers_type_filter": return []
     default: return nil
+    }
+}
+
+/// The Layers type-filter dropdown (`lp_filter_button`, LAYERS-S2 §2): the
+/// declared rows in a transient popover that STAYS OPEN after a toggle
+/// (DECISION S2-6) and closes on a press outside it or Escape. A plain click
+/// raises `toggle`, an Alt-click `alt_toggle` (solo), "All" its own action —
+/// each through the declared route (`PanelWidgetEvents.pick`). The ticks are
+/// the declared ones, read against the panel's live store so they follow each
+/// toggle while the popover is open.
+private struct LayersFilterDropdown: View {
+    let element: [String: Any]
+    let items: [[String: Any]]
+    let rows: [LayersMenuRow]
+    let panelId: String
+    @ObservedObject var model: Model
+    let context: [String: Any]
+    let actions: [String: Any]
+    @State private var open = false
+
+    /// The render scope with the panel's stored state laid over `panel`.
+    private var liveScope: [String: Any] {
+        _ = model.panelStateVersion
+        var scope = context
+        var panel = (scope["panel"] as? [String: Any]) ?? [:]
+        for (k, v) in model.stateStore.getPanelState(panelId) { panel[k] = v }
+        scope["panel"] = panel
+        return scope
+    }
+
+    var body: some View {
+        Button(action: { open.toggle() }) {
+            SwiftUI.Text("▾").font(.system(size: 11))
+        }
+        .buttonStyle(.borderless)
+        .frame(width: 20)
+        .help(element["summary"] as? String ?? "")
+        .popover(isPresented: $open, arrowEdge: .bottom) {
+            let scope = liveScope
+            let route = PanelWidgetEvents(model: model, panelId: panelId, scope: scope)
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(rows.indices, id: \.self) { i in
+                    let row = rows[i]
+                    switch row.kind {
+                    case .action:
+                        let inForce = WidgetEvent.itemInForce(
+                            item: items.first { $0["value"] as? String == row.value } ?? [:],
+                            panelId: panelId, actions: actions, scope: scope) == true
+                        Button(action: { route.pick(element, value: row.value, alt: false) }) {
+                            SwiftUI.Text(inForce ? "✓ \(row.label)" : "    \(row.label)")
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .buttonStyle(.plain)
+                        SwiftUI.Divider()
+                    case .toggle:
+                        let checked = WidgetEvent.itemChecked(widget: element, value: row.value,
+                                                              scope: scope) == true
+                        Button(action: {
+                            route.pick(element, value: row.value,
+                                       alt: NSEvent.modifierFlags.contains(.option))
+                        }) {
+                            SwiftUI.Text(checked ? "✓ \(row.label)" : "    \(row.label)")
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            .font(.system(size: 11))
+            .padding(8)
+            .frame(minWidth: 140)
+        }
     }
 }
 

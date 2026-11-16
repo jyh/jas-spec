@@ -7,6 +7,7 @@ pub mod evaluated_bounds;
 pub mod selection_geometry;
 pub mod id_index;
 pub mod model;
+pub mod move_elements;
 pub mod op_apply;
 // The NATIVE document walk (row CV): install this document's paint context,
 // then emit every layer through the Painter seam. Declared here so both the

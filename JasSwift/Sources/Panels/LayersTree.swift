@@ -9,12 +9,18 @@
 /// restates an action's effects. The SwiftUI view that calls these entry
 /// points is `LayersTreeView` (Interpreter/LayersTreeView.swift).
 ///
-/// Later slices plug in here rather than around it: rename (F2 / Enter /
-/// double-click on the name), isolation (double-click on a container row),
-/// Delete, the context menu and drag all arrive as further events through the
-/// same template lookup (``LayersPanel/pressAction``) and the same keyboard
-/// table (``LayersPanel/treeKey``), gated today by ``LayersPanel/s1TreeKeys``
-/// and the click-count check in ``LayersPanel/treePress``.
+/// Slice S2 (spec_inputs/LAYERS-S2-interaction-spec.md) extends it in place:
+/// rename (double-click on the name, F2, Enter, and the field's own events),
+/// the search / type-filter rows (``LayersPanel/treeRows(model:)``), and
+/// drag-and-drop, whose drop runs the `move_elements` action
+/// (Document/MoveElements.swift holds the op and its one validity check).
+///
+/// Later slices plug in here rather than around it: isolation (double-click
+/// on a container row), Delete and the context menu arrive as further events
+/// through the same template lookup (``LayersPanel/pressAction``) and the same
+/// keyboard table (``LayersPanel/treeKey``), gated today by
+/// ``LayersPanel/s1TreeKeys`` + ``LayersPanel/s2TreeKeys`` and
+/// ``LayersPanel/s2DoubleClickActions``.
 
 import AppKit
 import Foundation
@@ -94,6 +100,11 @@ public final class LayersTreeShell: ObservableObject {
     var panelMadeSelection: [[Int]]? = nil
     /// The AppKit view that holds key focus for the tree, when one is mounted.
     weak var keyView: NSView?
+    /// S2: the drag in progress (from `drag_start` to `drag_end`), or nil.
+    @Published public var drag: LayersDragState? = nil
+    /// The view's pointer gesture is in progress (its first move tried to
+    /// start a drag), whether or not a drag started.
+    var dragGestureOpen: Bool = false
 
     public init() {}
 
@@ -154,6 +165,13 @@ extension LayersPanel {
     static func treeSpec() -> [String: Any]? {
         guard let content = WorkspaceData.load()?.panelContent(panelContentId) else { return nil }
         return findNode(content, id: "lp_tree")
+    }
+
+    /// Any widget of the Layers panel's `content:` by id (`lp_search_input`,
+    /// `lp_filter_button`), for routing its events as the panel body does.
+    static func panelWidget(_ id: String) -> [String: Any]? {
+        guard let content = WorkspaceData.load()?.panelContent(panelContentId) else { return nil }
+        return findNode(content, id: id)
     }
 
     /// The row template (`lp_tree.do`).
@@ -230,12 +248,50 @@ extension LayersPanel {
     ///     document read, not the icon);
     ///   * `ancestor_layer_color`: the nearest ancestor layer's colour, which
     ///     fills the select square of an element-selected row.
+    ///   * `search_ancestor_only` (S2 §2): shown only because a descendant is a
+    ///     search / type-filter hit; the row template dims it.
+    ///
+    /// S2: while `search_query` or `type_filter` is non-empty only the SHOWN
+    /// rows are drawn (a hit, or an ancestor of one), and a container with a
+    /// hit beneath it is drawn expanded whatever `collapsed_paths` says, which
+    /// is NOT written (DECISION S2-4). In isolation only the isolated
+    /// container's proper descendants are candidates.
     public static func treeRows(model: Model) -> [[String: Any]] {
-        let all = elementTree(model.document)
-        let rows = treeVisibleRows(all,
-                                   collapsed: treeCollapsedPaths(model: model),
-                                   panelSelection: layersPanelSelection(model: model),
-                                   renaming: layersRenamingPath(model: model))
+        let doc = model.document
+        let all = elementTree(doc)
+        let pathOf = { (r: [String: Any]) -> [Int] in r["path"] as? [Int] ?? [] }
+        var candidates = all
+        if let iso = MoveElements.isolationRoot(model: model) {
+            candidates = all.filter { r in
+                let p = pathOf(r)
+                return p.count > iso.count && p.starts(with: iso)
+            }
+        }
+        let collapsed = treeCollapsedPaths(model: model)
+        let selection = layersPanelSelection(model: model)
+        let renaming = layersRenamingPath(model: model)
+        let filtering = treeFilterActive(model: model)
+        var hits: Set<[Int]> = []
+        let rows: [[String: Any]]
+        if filtering {
+            let query = treeSearchQuery(model: model).lowercased()
+            let types = Set(treeTypeFilter(model: model))
+            for r in candidates where treeRowHit(r, query: query, types: types, doc: doc) {
+                hits.insert(pathOf(r))
+            }
+            // Containers with a hit strictly beneath them: drawn expanded.
+            var openAbove: Set<[Int]> = []
+            for h in hits where h.count > 1 {
+                for n in 1..<h.count { openAbove.insert(Array(h.prefix(n))) }
+            }
+            let shown = hits.union(openAbove)
+            rows = treeVisibleRows(candidates.filter { shown.contains(pathOf($0)) },
+                                   collapsed: collapsed.filter { !openAbove.contains($0) },
+                                   panelSelection: selection, renaming: renaming)
+        } else {
+            rows = treeVisibleRows(candidates, collapsed: collapsed,
+                                   panelSelection: selection, renaming: renaming)
+        }
         let ownLocked = Set(all.compactMap { r -> [Int]? in
             (r["locked"] as? Bool == true) ? r["path"] as? [Int] : nil
         })
@@ -245,8 +301,44 @@ extension LayersPanel {
             r["own_locked"] = row["locked"] as? Bool ?? false
             r["locked"] = (1...max(p.count, 1)).contains { ownLocked.contains(Array(p.prefix($0))) }
             r["ancestor_layer_color"] = layerColor(topLevelIndex: p.first ?? 0)
+            r["search_ancestor_only"] = filtering && !hits.contains(p)
             return r
         }
+    }
+
+    // MARK: - Search and type filter (S2 §2)
+
+    /// `panel.search_query`.
+    public static func treeSearchQuery(model: Model) -> String {
+        (model.stateStore.getPanel(panelContentId, "search_query") as? String) ?? ""
+    }
+
+    /// `panel.type_filter`, the CHECKED type tokens, in stored order.
+    public static func treeTypeFilter(model: Model) -> [String] {
+        ((model.stateStore.getPanel(panelContentId, "type_filter") as? [Any]) ?? []).compactMap { $0 as? String }
+    }
+
+    /// A search query or a type filter is active (the one definition the rows
+    /// and the drop's validity rule 4 share: ``MoveElements/filterActive(model:)``).
+    public static func treeFilterActive(model: Model) -> Bool {
+        MoveElements.filterActive(model: model)
+    }
+
+    /// The label a search matches: the name, or `<Type>` for an unnamed element.
+    static func treeRowLabel(_ row: [String: Any]) -> String {
+        let name = row["name"] as? String ?? ""
+        return name.isEmpty ? "<" + (row["type_label"] as? String ?? "") + ">" : name
+    }
+
+    /// `hit(e)` = `match_q(e) ∧ match_t(e)`. `query` is already lowercased.
+    /// The type token is the app's one classification, ``layersTypeValue(_:)``.
+    static func treeRowHit(_ row: [String: Any], query: String, types: Set<String>, doc: Document) -> Bool {
+        if !query.isEmpty, !treeRowLabel(row).lowercased().contains(query) { return false }
+        if !types.isEmpty {
+            guard let p = row["path"] as? [Int], let e = doc.tryGetElement(p),
+                  types.contains(layersTypeValue(e)) else { return false }
+        }
+        return true
     }
 
     /// The scope the row template's expressions read: the action context's
@@ -329,19 +421,47 @@ extension LayersPanel {
         model.panelStateVersion &+= 1
     }
 
+    /// The `double_click` actions this slice raises: the name's rename (S2 §1).
+    /// The row's own double-click (`enter_isolation_mode`) is the isolation
+    /// slice's; it plugs in by joining this set.
+    public static let s2DoubleClickActions: Set<String> = ["rename_element"]
+
+    /// Whether `action`'s declared `enabled_when` holds in the action context
+    /// (true when it declares none).
+    static func actionEnabled(_ action: String, model: Model) -> Bool {
+        guard let ws = WorkspaceData.load(),
+              let def = (ws.data["actions"] as? [String: Any])?[action] as? [String: Any],
+              let cond = def["enabled_when"] as? String, !cond.isEmpty else { return true }
+        let ctx = actionContext(model: model, ws: ws, panelSelection: [],
+                                artboardsPanelSelection: [], params: [:])
+        return evaluate(cond, context: ctx).toBool()
+    }
+
     /// A press on `region` of the row at `path` (spec §2, §3). Takes the
     /// keyboard for the tree, then raises the one action the template routes
-    /// the press to. A second press of a double-click raises nothing in S1
-    /// (rename and isolation are later slices). Returns the action raised.
+    /// the press to. The second press of a double-click (`clickCount` 2)
+    /// raises the template's `double_click` route, limited to
+    /// ``s2DoubleClickActions``: a double-click on the name opens the rename
+    /// field (DECISION S2-3, S2-11: its first press already panel-selected
+    /// the row). Returns the action raised.
     @discardableResult
     public static func treePress(region: LayersRowRegion, path: [Int],
                                  mods: LayersPressMods = LayersPressMods(),
                                  clickCount: Int = 1,
                                  model: Model, shell: LayersTreeShell? = nil) -> String? {
         shell?.focusTree()
-        guard clickCount <= 1 else { return nil }
-        guard let node = treeRows(model: model).first(where: { ($0["path"] as? [Int]) == path }),
-              let hit = pressAction(region: region, node: node, mods: mods, model: model)
+        guard let node = treeRows(model: model).first(where: { ($0["path"] as? [Int]) == path })
+        else { return nil }
+        if clickCount >= 2 {
+            guard let hit = pressAction(region: region, node: node, mods: mods,
+                                        event: "double_click", model: model),
+                  s2DoubleClickActions.contains(hit.action),
+                  actionEnabled(hit.action, model: model)
+            else { return nil }
+            runTreeAction(hit.action, params: hit.params, model: model)
+            return hit.action
+        }
+        guard let hit = pressAction(region: region, node: node, mods: mods, model: model)
         else { return nil }
         runTreeAction(hit.action, params: hit.params, model: model)
         if hit.action == "layers_element_select" {
@@ -373,18 +493,66 @@ extension LayersPanel {
     /// application's normal route. The command chord is Cmd on the Mac (R-3):
     /// `mods.cmd` (or `mods.ctrl`, the scripts' spelling of it) is the chord's
     /// `Ctrl`.
+    ///
+    /// S2: F2 and Enter join (rename, `keyboard:` rows; Enter's own
+    /// `enabled_when` asks for exactly one selected row, and F2 honours
+    /// `rename_element`'s). While a rename is open the FIELD has the keyboard
+    /// and this table is not consulted at all (DECISION S2-1). Under a search
+    /// or type filter the arrow keys reach only SHOWN rows (S2 §2), as the
+    /// plain row selection a nav move is (``treeFilteredNav(_:model:)``).
     @discardableResult
     public static func treeKey(_ key: String, mods: KeyMods, model: Model) -> Bool {
+        if layersRenamingPath(model: model) != nil { return false }
         guard let tree = treeSpec(), let ws = WorkspaceData.load() else { return false }
+        let keys = s1TreeKeys.union(s2TreeKeys)
         let rows = ((tree["keyboard"] as? [Any]) ?? []).filter { row in
             guard let k = (row as? [String: Any])?["key"] as? String else { return false }
-            return s1TreeKeys.contains(k)
+            return keys.contains(k)
         }
         let chord = KeyChord(key: key, ctrl: mods.cmd || mods.ctrl, shift: mods.shift, alt: mods.alt)
         let ctx = actionContext(model: model, ws: ws, panelSelection: [],
                                 artboardsPanelSelection: [], params: [:])
         guard let hit = resolvePanelKey(["keyboard": rows], chord: chord, context: ctx) else { return false }
+        if hit.action.hasPrefix("layers_nav_"), treeFilterActive(model: model) {
+            return treeFilteredNav(key, model: model)
+        }
+        if hit.action == "rename_element", !actionEnabled(hit.action, model: model) { return false }
         runTreeAction(hit.action, params: hit.params, model: model)
+        return true
+    }
+
+    /// The S2 rows of `lp_tree`'s `keyboard:` table: rename. (Delete,
+    /// Backspace and Escape-for-isolation stay with the later slice.)
+    public static let s2TreeKeys: Set<String> = ["F2", "Enter"]
+
+    /// An arrow key under a search or type filter: the nav actions walk
+    /// `tree_visible_rows`, which knows no filter, so the shell moves over the
+    /// SHOWN rows and raises the move a nav move is, a plain row selection
+    /// (`layers_panel_select`). Up / Down: the previous / next shown row (the
+    /// first / last with no focus). Left: the parent row. Right: the first
+    /// shown child. `collapsed_paths` is not written while filtering (S2-4).
+    static func treeFilteredNav(_ key: String, model: Model) -> Bool {
+        let paths = treeRows(model: model).compactMap { $0["path"] as? [Int] }
+        guard !paths.isEmpty else { return true }
+        let focus = treeFocusRow(model: model)
+        let idx = focus.flatMap { paths.firstIndex(of: $0) }
+        var target: [Int]? = nil
+        switch key {
+        case "ArrowDown":
+            if let i = idx { target = i + 1 < paths.count ? paths[i + 1] : nil } else { target = paths.first }
+        case "ArrowUp":
+            if let i = idx { target = i > 0 ? paths[i - 1] : nil } else { target = paths.last }
+        case "ArrowLeft":
+            if let f = focus, f.count > 1, paths.contains(Array(f.dropLast())) { target = Array(f.dropLast()) }
+        case "ArrowRight":
+            if let i = idx, let f = focus, i + 1 < paths.count,
+               paths[i + 1].count == f.count + 1, paths[i + 1].starts(with: f) { target = paths[i + 1] }
+        default:
+            break
+        }
+        if let t = target {
+            runTreeAction("layers_panel_select", params: ["path": t, "modifier": "none"], model: model)
+        }
         return true
     }
 
@@ -426,5 +594,296 @@ extension LayersPanel {
         if row < scrollTop { return row }
         if row >= scrollTop + vp { return row - vp + 1 }
         return scrollTop
+    }
+}
+
+// MARK: - S2: inline rename (spec_inputs/LAYERS-S2-interaction-spec.md §1)
+
+extension LayersPanel {
+
+    /// The row being renamed (`panel.renaming_element`), or nil.
+    public static func treeRenamingPath(model: Model) -> [Int]? {
+        layersRenamingPath(model: model)
+    }
+
+    /// The text the rename field opens with (DECISION S2-2): the element's
+    /// CURRENT name, empty for an unnamed element (never its `<Type>` label).
+    /// The view selects all of it.
+    public static func renameFieldInitialText(model: Model) -> String {
+        guard let p = layersRenamingPath(model: model), let e = model.document.tryGetElement(p)
+        else { return "" }
+        return e.name ?? ""
+    }
+
+    /// The node a field event is evaluated against: the renamed row.
+    private static func renamingNode(model: Model) -> [String: Any]? {
+        guard let p = layersRenamingPath(model: model) else { return nil }
+        return treeRows(model: model).first { ($0["path"] as? [Int]) == p }
+            ?? elementTree(model.document).first { ($0["path"] as? [Int]) == p }
+            ?? ["path": p]
+    }
+
+    /// Deliver one `lp_name_edit` event (`keydown` / `blur`) with `event.value`
+    /// the field's text, and run the behaviour the template declares for it.
+    private static func renameFieldEvent(_ event: String, _ ev: [String: Any], model: Model) -> String? {
+        guard let node = renamingNode(model: model),
+              let template = treeRowTemplate(),
+              let widget = templateWidget("lp_name_edit", in: template) else { return nil }
+        var ctx = treeEvalContext(model: model)
+        ctx["node"] = node
+        var e = LayersPressMods().eventDict
+        for (k, v) in ev { e[k] = v }
+        e["target_id"] = "lp_name_edit"
+        ctx["event"] = e
+        guard let hit = firstBehavior(widget, event: event, ctx: ctx) else { return nil }
+        runTreeAction(hit.action, params: hit.params, model: model)
+        return hit.action
+    }
+
+    /// A key in the rename field: Enter confirms with the field's text, Escape
+    /// cancels (the field consumes Escape: it never exits isolation, S2-1).
+    /// Any other key is the field's own (caret, deletion) and raises nothing.
+    /// After Enter or Escape the keyboard returns to the tree. Returns the
+    /// action raised.
+    @discardableResult
+    public static func renameFieldKey(_ key: String, text: String, model: Model,
+                                      shell: LayersTreeShell? = nil) -> String? {
+        let raised = renameFieldEvent("keydown", ["key": key, "value": text], model: model)
+        if raised != nil { shell?.focusTree() }
+        return raised
+    }
+
+    /// The field lost focus (a press outside it, a panel switch): confirms
+    /// with the field's text while the row is still being renamed; after
+    /// Enter or Escape it finds nothing to do (the template's `blur`
+    /// condition).
+    @discardableResult
+    public static func renameFieldBlur(text: String, model: Model) -> String? {
+        renameFieldEvent("blur", ["value": text], model: model)
+    }
+}
+
+// MARK: - S2: drag-and-drop (spec §3)
+
+/// Where a drop lands relative to the row under the pointer (DECISION S2-9).
+public enum LayersDropZone: String, CaseIterable {
+    /// Above the row's element in z order (the tree draws topmost first).
+    case before
+    /// Below the row's element in z order.
+    case after
+    /// Into the row's container, as its topmost child (DECISION S2-14).
+    case into
+}
+
+/// A drop point: the row under the pointer and the zone of it.
+public struct LayersDropPoint: Equatable {
+    public var row: [Int]
+    public var zone: LayersDropZone
+    public init(row: [Int], zone: LayersDropZone) { self.row = row; self.zone = zone }
+}
+
+/// The shell's state for one drag (spec §3), from `drag_start` to `drag_end`.
+public struct LayersDragState: Equatable {
+    /// The row the drag started on.
+    public var pressed: [Int]
+    /// Where it would drop now, or nil (off the rows).
+    public var point: LayersDropPoint?
+    /// `drop_valid` for `point`: the op's own check.
+    public var valid: Bool
+    /// The row the pointer has rested on since `hoverStartMs`.
+    public var hoverRow: [Int]?
+    public var hoverStartMs: Double
+}
+
+extension LayersPanel {
+
+    /// A pointer move beyond this many points with the button down starts a
+    /// drag (DECISION S2-7).
+    public static let dragThreshold: Double = 4
+    /// Resting on a collapsed container this long expands it (layers.yaml).
+    public static let hoverExpandMs: Double = 500
+
+    /// The zone of a row the pointer is over, from its vertical position in the
+    /// row (0 = top, 1 = bottom): the top quarter is before, the bottom quarter
+    /// after, the middle half into a container; a leaf has only before and
+    /// after, split at the middle (DECISION S2-9).
+    public static func dropZone(fraction: Double, isContainer: Bool) -> LayersDropZone {
+        if fraction < 0.25 { return .before }
+        if fraction >= 0.75 { return .after }
+        if isContainer { return .into }
+        return fraction < 0.5 ? .before : .after
+    }
+
+    /// The drop point converted to `move_elements`' parameters (spec §3): the
+    /// target parent (a path before the move) and `index`, in DOCUMENT order,
+    /// read AFTER the dragged elements (the panel selection) are removed.
+    /// "into" is the parent's child count after removal (its topmost child);
+    /// "before" a row is that row's index after removal + 1 (above it);
+    /// "after" a row is that index (below it). A drop before or after a
+    /// DRAGGED row lands where that row was. nil when the point names no
+    /// element, or "into" a non-container.
+    public static func dropTarget(_ point: LayersDropPoint, model: Model) -> (parent: [Int], index: Int)? {
+        let doc = model.document
+        let moved = MoveElements.movedRoots(layersPanelSelection(model: model))
+        let r = point.row
+        guard let last = r.last, let elem = doc.tryGetElement(r) else { return nil }
+        switch point.zone {
+        case .into:
+            switch elem {
+            case .layer, .group: break
+            default: return nil
+            }
+            let leaving = moved.filter { $0.count == r.count + 1 && Array($0.dropLast()) == r }.count
+            return (r, childrenOfPath(doc, r).count - leaving)
+        case .before, .after:
+            let parent = Array(r.dropLast())
+            let below = moved.filter {
+                $0.count == r.count && Array($0.dropLast()) == parent && ($0.last ?? 0) < last
+            }.count
+            let at = last - below
+            if moved.contains(r) { return (parent, at) }
+            return (parent, point.zone == .before ? at + 1 : at)
+        }
+    }
+
+    /// `drop_valid`: the drop point resolves and `move_elements`' own check
+    /// accepts it (the one authority; no second copy of the rules here).
+    public static func dropValid(_ point: LayersDropPoint, model: Model) -> Bool {
+        guard let t = dropTarget(point, model: model) else { return false }
+        return MoveElements.check(model: model, paths: layersPanelSelection(model: model),
+                                  targetParent: t.parent) == nil
+    }
+
+    /// Why the drop at `point` would be refused, by the op's name; nil when valid.
+    public static func dropRefusal(_ point: LayersDropPoint, model: Model) -> MoveElementsRefusal? {
+        guard let t = dropTarget(point, model: model) else { return .parentNotContainer }
+        return MoveElements.check(model: model, paths: layersPanelSelection(model: model),
+                                  targetParent: t.parent)
+    }
+
+    /// `panel.drag_active` (shell-bound state; no action writes it).
+    public static func treeDragActive(model: Model) -> Bool {
+        model.stateStore.getPanel(panelContentId, "drag_active") as? Bool ?? false
+    }
+
+    private static func setDragActive(_ on: Bool, model: Model) {
+        ensureLayersScope(model)
+        model.stateStore.setPanel(panelContentId, "drag_active", on)
+        model.panelStateVersion &+= 1
+    }
+
+    /// The row template's own behaviour for a row event (`drag_start`,
+    /// `drag_end`), evaluated for `node` with `event`.
+    private static func rowBehavior(_ event: String, node: [String: Any], ev: [String: Any],
+                                    model: Model) -> (action: String, params: [String: Any])? {
+        guard let template = treeRowTemplate() else { return nil }
+        var ctx = treeEvalContext(model: model)
+        ctx["node"] = node
+        var e = LayersPressMods().eventDict
+        for (k, v) in ev { e[k] = v }
+        ctx["event"] = e
+        return firstBehavior(template, event: event, ctx: ctx)
+    }
+
+    /// A drag starts on `region` of the row at `path` (the pointer moved past
+    /// ``dragThreshold`` with the button down). Only a region that
+    /// panel-selects starts one (S1 §2). DECISION S2-8: a row already
+    /// panel-selected keeps the whole selection, which is what is dragged;
+    /// otherwise the row's `drag_start` behaviour (`layers_panel_select`)
+    /// makes it the selection first. `drag_active` is true until the end.
+    /// Returns whether a drag started.
+    @discardableResult
+    public static func treeDragStart(region: LayersRowRegion, path: [Int], model: Model,
+                                     shell: LayersTreeShell, nowMs: Double = 0) -> Bool {
+        shell.focusTree()
+        guard let node = treeRows(model: model).first(where: { ($0["path"] as? [Int]) == path }),
+              pressAction(region: region, node: node, mods: LayersPressMods(), model: model)?.action
+                == "layers_panel_select"
+        else { return false }
+        if !layersPanelSelection(model: model).contains(path),
+           let hit = rowBehavior("drag_start", node: node, ev: [:], model: model) {
+            runTreeAction(hit.action, params: hit.params, model: model)
+        }
+        setDragActive(true, model: model)
+        shell.drag = LayersDragState(pressed: path, point: nil, valid: false,
+                                     hoverRow: nil, hoverStartMs: nowMs)
+        return true
+    }
+
+    /// The pointer moved during a drag (`drag_move`): the drop point and its
+    /// validity (the indicator, or "not allowed") are recomputed, and the
+    /// hover clock restarts when the pointer enters another row.
+    public static func treeDragMove(to point: LayersDropPoint?, nowMs: Double, model: Model,
+                                    shell: LayersTreeShell) {
+        guard var d = shell.drag else { return }
+        if point?.row != d.hoverRow {
+            d.hoverRow = point?.row
+            d.hoverStartMs = nowMs
+        }
+        d.point = point
+        d.valid = point.map { dropValid($0, model: model) } ?? false
+        shell.drag = d
+        treeDragHoverTick(nowMs: nowMs, model: model, shell: shell)
+    }
+
+    /// Time passes during a drag. Resting on a COLLAPSED container for
+    /// ``hoverExpandMs`` expands it: a real write, by the twirl's own action
+    /// (`toggle_element_twirl`). Not while filtering, where the tree draws
+    /// containers expanded as a view and `collapsed_paths` is not written
+    /// (DECISION S2-4). Returns whether it expanded one.
+    @discardableResult
+    public static func treeDragHoverTick(nowMs: Double, model: Model, shell: LayersTreeShell) -> Bool {
+        guard var d = shell.drag, let row = d.hoverRow,
+              nowMs - d.hoverStartMs >= hoverExpandMs,
+              !treeFilterActive(model: model),
+              treeCollapsedPaths(model: model).contains(row),
+              let node = treeRows(model: model).first(where: { ($0["path"] as? [Int]) == row }),
+              node["is_container"] as? Bool == true
+        else { return false }
+        runTreeAction("toggle_element_twirl", params: ["path": row], model: model)
+        d.valid = d.point.map { dropValid($0, model: model) } ?? false
+        shell.drag = d
+        return true
+    }
+
+    /// The button is released (`drag_end`): the row's `drag_end` behaviour
+    /// raises `move_elements(drop_parent, drop_index)` when `drop_valid`
+    /// holds, through the action (one undo step, its own `snapshot`). Off the
+    /// rows, or refused, nothing moves. `drag_active` ends. Returns the action
+    /// raised.
+    @discardableResult
+    public static func treeDragEnd(model: Model, shell: LayersTreeShell) -> String? {
+        guard let d = shell.drag else { return nil }
+        shell.drag = nil
+        defer { setDragActive(false, model: model) }
+        guard let point = d.point, let target = dropTarget(point, model: model) else { return nil }
+        let node = elementTree(model.document).first { ($0["path"] as? [Int]) == d.pressed }
+            ?? ["path": d.pressed]
+        let ev: [String: Any] = ["drop_valid": dropValid(point, model: model),
+                                 "drop_parent": target.parent, "drop_index": target.index]
+        guard let hit = rowBehavior("drag_end", node: node, ev: ev, model: model) else { return nil }
+        runTreeAction(hit.action, params: hit.params, model: model)
+        return hit.action
+    }
+
+    /// The drag is abandoned (Escape, the window lost the pointer): nothing moves.
+    public static func treeDragCancel(model: Model, shell: LayersTreeShell) {
+        guard shell.drag != nil else { return }
+        shell.drag = nil
+        setDragActive(false, model: model)
+    }
+
+    /// One whole gesture, as an input script states it: press `from`, drag to
+    /// `point`, rest there `hoverMs`, release. Returns the action the release
+    /// raised (nil when nothing moved).
+    @discardableResult
+    public static func treeDrag(from path: [Int], region: LayersRowRegion = .name,
+                                to point: LayersDropPoint, hoverMs: Double = 0,
+                                model: Model, shell: LayersTreeShell? = nil) -> String? {
+        let sh = shell ?? LayersTreeShell()
+        guard treeDragStart(region: region, path: path, model: model, shell: sh, nowMs: 0) else { return nil }
+        treeDragMove(to: point, nowMs: 0, model: model, shell: sh)
+        treeDragHoverTick(nowMs: hoverMs, model: model, shell: sh)
+        return treeDragEnd(model: model, shell: sh)
     }
 }

@@ -2101,6 +2101,12 @@ public func opApply(
             return .missingTarget(id: String(describing: path))
         }
         model.editDocument(model.document.settingElementVisibility(at: path, vis))
+    // The Layers drop (`actions.yaml` §move_elements, LAYERS-S2 §3): move the
+    // panel selection to `index` under `target_parent`, remapping every stored
+    // panel path. The body is `MoveElements` (Document/MoveElements.swift);
+    // it refuses by name and takes no snapshot of its own.
+    case "move_elements":
+        if let err = MoveElements.applyOp(model, op) { return err }
     case "lock_selection":
         controller.lockSelection()
     case "unlock_all":
