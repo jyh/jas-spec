@@ -63,28 +63,69 @@ import Foundation
 
     // MARK: - The five rules, refused by name
 
+    @Test func theRefusalNamesAreTheSpecsInTheRulesOrder() {
+        #expect(MoveElementsRefusal.allCases.map(\.rawValue)
+                == ["into_itself_or_descendant", "locked_parent", "wrong_parent_kind",
+                    "filter_active", "outside_isolation"])
+    }
+
     @Test func rule1IntoItselfAndIntoItsDescendants() {
-        #expect(Self.check(Self.doc(), [[0, 2]], [0, 2]) == .intoItself)
-        #expect(Self.check(Self.nested(), [[0, 0]], [0, 0, 0]) == .intoItself, "G8: the descendant half")
+        #expect(Self.check(Self.doc(), [[0, 2]], [0, 2]) == .intoItselfOrDescendant)
+        #expect(Self.check(Self.nested(), [[0, 0]], [0, 0, 0]) == .intoItselfOrDescendant,
+                "G8: the descendant half")
     }
 
     @Test func rule2ALockedParentByItsOwnFlagOrAnAncestors() {
         let own = Self.doc().togglingElementLock(at: [1])
-        #expect(Self.check(own, [[0, 0]], [1]) == .parentLocked)
+        #expect(Self.check(own, [[0, 0]], [1]) == .lockedParent)
         let inherited = Self.doc().togglingElementLock(at: [0])
-        #expect(Self.check(inherited, [[1, 0]], [0, 2]) == .parentLocked)
+        #expect(Self.check(inherited, [[1, 0]], [0, 2]) == .lockedParent)
         let lockedMover = Self.doc().togglingElementLock(at: [0, 0])
         #expect(Self.check(lockedMover, [[0, 0]], [1]) == nil, "a locked element may move")
     }
 
     @Test func rule3LayersToRootOrLayersEverythingElseIntoContainers() {
-        #expect(Self.check(Self.doc(), [[1]], [0, 2]) == .layerIntoGroup)
+        #expect(Self.check(Self.doc(), [[1]], [0, 2]) == .wrongParentKind, "a layer into a group")
         #expect(Self.check(Self.doc(), [[1]], [0]) == nil, "a layer into a layer")
         #expect(Self.check(Self.doc(), [[1]], []) == nil, "a layer to the root")
-        #expect(Self.check(Self.doc(), [[0, 1]], []) == .elementToRoot)
+        #expect(Self.check(Self.doc(), [[0, 1]], []) == .wrongParentKind, "a leaf to the root")
         #expect(Self.check(Self.doc(), [[0, 2]], [1]) == nil, "a group into a layer")
         #expect(Self.check(Self.doc(), [[0, 0]], [0, 2]) == nil, "a leaf into a group")
-        #expect(Self.check(Self.doc(), [[0, 0]], [0, 1]) == .parentNotContainer)
+        #expect(Self.check(Self.doc(), [[0, 0]], [0, 1]) == .wrongParentKind, "a parent that is no container")
+        #expect(Self.check(Self.doc(), [[1]], [0, 1]) == .wrongParentKind)
+    }
+
+    // MARK: - The first failure, in the rules' order
+
+    @Test func rule1IsCheckedForEveryElementBeforeRule3ForAny() {
+        // L0 = [r0], L1 = [G[r20]]. In document order the layer [0] fails rule 3
+        // (a layer into a group) BEFORE [1,0] fails rule 1 (into itself); the
+        // rules run in their order, so rule 1 is the first failure.
+        let d = Document(layers: [Layer(name: "A", children: [Self.rect(0)]),
+                                  Layer(name: "B", children: [.group(Group(children: [Self.rect(20)]))])])
+        #expect(Self.check(d, [[0], [1, 0]], [1, 0]) == .intoItselfOrDescendant)
+    }
+
+    @Test func rule1BeforeRule2() {
+        let d = Self.doc().togglingElementLock(at: [0, 2])
+        #expect(Self.check(d, [[0, 2]], [0, 2]) == .intoItselfOrDescendant)
+    }
+
+    @Test func rule2BeforeRule3() {
+        let d = Self.doc().togglingElementLock(at: [0, 2])
+        #expect(Self.check(d, [[1]], [0, 2]) == .lockedParent, "a layer into a LOCKED group")
+    }
+
+    @Test func rule3BeforeRule4() {
+        #expect(Self.check(Self.doc(), [[0, 1]], [], filter: true) == .wrongParentKind)
+    }
+
+    @Test func rule4BeforeRule5() {
+        #expect(Self.check(Self.doc(), [[0, 0]], [1], filter: true, iso: [0]) == .filterActive)
+    }
+
+    @Test func anEmptyMoveFailsNoRule() {
+        #expect(Self.check(Self.doc(), [], [0], filter: true, iso: [1]) == nil)
     }
 
     @Test func rule4NoMoveWhileFiltering() {
@@ -107,16 +148,51 @@ import Foundation
     }
 
     @Test func oneInvalidElementRefusesTheWholeMove() {
-        #expect(Self.check(Self.doc(), [[0, 0], [1]], [0, 2]) == .layerIntoGroup)
-        #expect(Self.check(Self.doc(), [], [0]) == .noElements)
-        #expect(Self.check(Self.doc(), [[5]], [0]) == .missingElement)
-        #expect(Self.check(Self.doc(), [[0, 0]], [7]) == .missingParent)
+        #expect(Self.check(Self.doc(), [[0, 0], [1]], [0, 2]) == .wrongParentKind)
+    }
+
+    // MARK: - Errors, refusals and no-ops
+
+    @Test func missingTargetsAreErrorsNotRefusals() {
+        #expect(MoveElements.missingTarget(Self.doc(), paths: [[5]], targetParent: [0]) == .missingElement)
+        #expect(MoveElements.missingTarget(Self.doc(), paths: [[]], targetParent: [0]) == .missingElement,
+                "the root is no element to move")
+        #expect(MoveElements.missingTarget(Self.doc(), paths: [[0, 0]], targetParent: [7]) == .missingParent)
+        #expect(MoveElements.missingTarget(Self.doc(), paths: [[0, 0]], targetParent: []) == nil)
+        #expect(Self.failure(MoveElements.apply(Self.doc(), paths: [[5]], targetParent: [0], index: 0))
+                == .missingElement)
+        #expect(Self.failure(MoveElements.apply(Self.doc(), paths: [[0, 0]], targetParent: [7], index: 0))
+                == .missingParent)
+    }
+
+    @Test func aRefusalIsAnUnchangedSuccessCarryingTheRulesName() {
+        let r = MoveElements.apply(Self.doc(), paths: [[1]], targetParent: [0, 2], index: 0)
+        guard case .success(.refused(let why)) = r else { Issue.record("expected a refusal, got \(r)"); return }
+        #expect(why == .wrongParentKind)
+    }
+
+    @Test func anEmptyMoveIsNothingToMove() {
+        let r = MoveElements.apply(Self.doc(), paths: [], targetParent: [0], index: 0)
+        guard case .success(.nothingToMove) = r else { Issue.record("expected a no-op, got \(r)"); return }
     }
 
     // MARK: - The move
 
+    private static func moved(_ r: Result<MoveElementsEffect, MoveElementsError>) throws -> MoveElements.Outcome {
+        guard case .success(.moved(let out)) = r else {
+            Issue.record("expected a move, got \(r)")
+            throw MoveElementsError.badIndex
+        }
+        return out
+    }
+
+    private static func failure(_ r: Result<MoveElementsEffect, MoveElementsError>) -> MoveElementsError? {
+        if case .failure(let e) = r { return e }
+        return nil
+    }
+
     @Test func insertsInDocumentOrderAtTheIndexReadAfterRemoval() throws {
-        let out = try MoveElements.apply(Self.doc(), paths: [[0, 1], [0, 0]], targetParent: [1], index: 0).get()
+        let out = try Self.moved(MoveElements.apply(Self.doc(), paths: [[0, 1], [0, 0]], targetParent: [1], index: 0))
         #expect(out.document.layers[1].children == [Self.rect(0), Self.rect(20), Self.rect(60)])
         #expect(out.document.layers[0].children.count == 1)
         #expect(out.movedPaths == [[1, 0], [1, 1]])
@@ -124,26 +200,28 @@ import Foundation
 
     @Test func theParentPathIsReadBeforeTheMove() throws {
         // [0,0] leaves layer 0, so the group [0,2] becomes [0,1]; into it, topmost.
-        let out = try MoveElements.apply(Self.doc(), paths: [[0, 0]], targetParent: [0, 2], index: 1).get()
+        let out = try Self.moved(MoveElements.apply(Self.doc(), paths: [[0, 0]], targetParent: [0, 2], index: 1))
         #expect(out.document.getElement([0, 1, 1]) == Self.rect(0))
         #expect(out.movedPaths == [[0, 1, 1]])
     }
 
-    @Test func anIndexPastTheChildrenIsRefused() {
-        let r = MoveElements.apply(Self.doc(), paths: [[0, 0]], targetParent: [1], index: 3)
-        if case .failure(let why) = r { #expect(why == .badIndex) } else { Issue.record("expected a refusal") }
+    @Test func anIndexPastTheChildrenIsAnError() {
+        #expect(Self.failure(MoveElements.apply(Self.doc(), paths: [[0, 0]], targetParent: [1], index: 3))
+                == .badIndex)
+        #expect(Self.failure(MoveElements.apply(Self.doc(), paths: [[0, 0]], targetParent: [1], index: -1))
+                == .badIndex)
     }
 
     @Test func layersMoveAtTheRootAndTheTargetLayerFollows() throws {
         let d = Self.doc().replacing(selectedLayer: 1)
-        let out = try MoveElements.apply(d, paths: [[1]], targetParent: [], index: 0).get()
+        let out = try Self.moved(MoveElements.apply(d, paths: [[1]], targetParent: [], index: 0))
         #expect(out.document.layers.map(\.name) == ["Layer 2", "Layer 1"])
         #expect(out.document.selectedLayer == 0)
     }
 
     @Test func theElementSelectionFollowsItsElements() throws {
         let d = Self.doc().replacing(selection: [.all([0, 2, 0]), .all([0, 0])])
-        let out = try MoveElements.apply(d, paths: [[0, 0]], targetParent: [1], index: 1).get()
+        let out = try Self.moved(MoveElements.apply(d, paths: [[0, 0]], targetParent: [1], index: 1))
         #expect(out.document.selection.map(\.path) == [[0, 1, 0], [1, 1]])
     }
 
@@ -157,13 +235,55 @@ import Foundation
         #expect(m.document.layers[1].children == [Self.rect(60), Self.rect(0)])
     }
 
-    @Test func aRefusalIsNamedAndChangesNothing() {
+    @Test func aRefusedOpSucceedsChangesNothingAndJournalsNothing() {
+        for (paths, parent) in [([[1]], [0, 2]),       // wrong_parent_kind
+                                ([[0, 2]], [0, 2]),    // into_itself_or_descendant
+                                ([[0, 1]], [Int]())] { // wrong_parent_kind (a leaf to the root)
+            let m = Self.model()
+            let before = m.document
+            m.beginTxn()
+            let err = opApply(m, Controller(model: m),
+                              ["op": "move_elements", "paths": paths, "target_parent": parent, "index": 0])
+            m.commitTxn()
+            #expect(err == nil, "a refusal is no error: \(paths) → \(parent)")
+            #expect(m.document == before)
+            #expect(m.journal.isEmpty, "nothing journaled")
+            #expect(!m.canUndo, "no undo step")
+        }
+    }
+
+    @Test func aRefusedOpWithAnOutOfRangeIndexIsStillOnlyARefusal() {
+        // The index is read after removal, i.e. only for a move the rules allow.
         let m = Self.model()
-        let before = m.document
         let err = opApply(m, Controller(model: m),
-                          ["op": "move_elements", "paths": [[1]], "target_parent": [0, 2], "index": 0])
-        #expect(err == .badParamType(name: "move_elements: layer_into_group"))
-        #expect(m.document == before)
+                          ["op": "move_elements", "paths": [[1]], "target_parent": [0, 2], "index": 99])
+        #expect(err == nil)
+        #expect(m.document.layers == Self.doc().layers)
+    }
+
+    @Test func anEmptyOpIsANoOp() {
+        let m = Self.model()
+        m.beginTxn()
+        let err = opApply(m, Controller(model: m),
+                          ["op": "move_elements", "paths": [[Int]](), "target_parent": [0], "index": 0])
+        m.commitTxn()
+        #expect(err == nil)
+        #expect(m.document.layers == Self.doc().layers)
+        #expect(m.journal.isEmpty)
+    }
+
+    @Test func badParametersAndMissingTargetsStayErrors() {
+        func run(_ paths: [[Int]], _ parent: [Int], _ index: Int) -> String? {
+            let m = Self.model()
+            let err = opApply(m, Controller(model: m),
+                              ["op": "move_elements", "paths": paths, "target_parent": parent, "index": index])
+            #expect(m.document.layers == Self.doc().layers, "an error changes nothing")
+            return err?.className
+        }
+        #expect(run([[5]], [0], 0) == "MissingTarget", "a missing element")
+        #expect(run([[0, 0]], [7], 0) == "MissingTarget", "a missing parent")
+        #expect(run([[0, 0]], [1], 3) == "BadParamType", "an index out of range")
+        #expect(run([[0, 0]], [1], -1) == "BadParamType", "a negative index")
     }
 
     @Test func theOpTakesNoSnapshotOfItsOwn() {

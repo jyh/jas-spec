@@ -2104,9 +2104,16 @@ public func opApply(
     // The Layers drop (`actions.yaml` §move_elements, LAYERS-S2 §3): move the
     // panel selection to `index` under `target_parent`, remapping every stored
     // panel path. The body is `MoveElements` (Document/MoveElements.swift);
-    // it refuses by name and takes no snapshot of its own.
+    // it takes no snapshot of its own. A move a validity rule refuses, and an
+    // empty move, SUCCEED with nothing changed and are NOT journaled (spec §3,
+    // ERRATUM 1), returning before `recordOp` as `delete_selection`'s benign
+    // no-op does; a missing target or an out-of-range index stays an error.
     case "move_elements":
-        if let err = MoveElements.applyOp(model, op) { return err }
+        switch MoveElements.applyOp(model, op) {
+        case .failed(let err): return err
+        case .unchanged: return nil
+        case .moved: break
+        }
     case "lock_selection":
         controller.lockSelection()
     case "unlock_all":
