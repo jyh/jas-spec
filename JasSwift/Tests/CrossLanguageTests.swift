@@ -850,10 +850,20 @@ private func replayJournal(_ svg: String, _ journal: [Transaction], _ head: Int)
     return documentToTestJson(model.document)
 }
 
-private func runOperationFixture(_ fixture: String) throws {
+/// Run the cases of one operations corpus file. With `named`, run exactly the
+/// cases of those names (each must exist in the file), so a test claims its
+/// cases BY NAME.
+private func runOperationFixture(_ fixture: String, named: [String]? = nil) throws {
     let json = readFixture("operations/\(fixture)")
     let data = json.data(using: .utf8)!
-    let tests = try JSONSerialization.jsonObject(with: data) as! [[String: Any]]
+    var tests = try JSONSerialization.jsonObject(with: data) as! [[String: Any]]
+    if let named {
+        for want in named where !tests.contains(where: { $0["name"] as? String == want }) {
+            Issue.record("operations/\(fixture) has no case named '\(want)'")
+        }
+        tests = tests.filter { named.contains($0["name"] as? String ?? "") }
+        #expect(!tests.isEmpty, "operations/\(fixture): no case ran")
+    }
 
     for tc in tests {
         let name = tc["name"] as! String
@@ -1190,6 +1200,33 @@ private func transformedCanonicalDocument() -> Document {
 /// twice.
 @Test func operationLockSelectionNoMaterialization() throws {
     try runOperationFixture("lock_selection_no_materialization.json")
+}
+
+/// `move_elements` (LAYERS-S2 interaction spec §3, ERRATUM 1): the Layers
+/// panel's drop. Each case of `operations/move_elements.json` is claimed by
+/// name. A valid move swaps the two rects; a move a validity rule refuses
+/// (a layer into itself, `into_itself_or_descendant`) SUCCEEDS with the
+/// document unchanged, as does an empty move.
+@Test func operationMoveElementsValidMove() throws {
+    try runOperationFixture("move_elements.json", named: ["moving_a_leaf_to_the_top_of_its_layer"])
+}
+
+@Test func operationMoveElementsRefusedByARule() throws {
+    try runOperationFixture("move_elements.json", named: ["a_move_refused_by_a_rule_changes_nothing"])
+}
+
+@Test func operationMoveElementsEmptyMove() throws {
+    try runOperationFixture("move_elements.json", named: ["an_empty_move_is_a_no_op"])
+}
+
+/// The file holds exactly the three cases claimed above, so a case added to
+/// it later cannot go unclaimed by this port.
+@Test func operationMoveElementsEveryCaseIsClaimed() throws {
+    let tests = try JSONSerialization.jsonObject(with: Data(readFixture("operations/move_elements.json").utf8))
+        as! [[String: Any]]
+    #expect(tests.compactMap { $0["name"] as? String }.sorted()
+            == ["a_move_refused_by_a_rule_changes_nothing", "an_empty_move_is_a_no_op",
+                "moving_a_leaf_to_the_top_of_its_layer"])
 }
 
 /// `state.boolean_remove_redundant_points` defaults to FALSE

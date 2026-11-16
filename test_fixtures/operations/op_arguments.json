@@ -179,6 +179,17 @@
         "array"
       ]
     },
+    "move_elements": {
+      "index": [
+        "number"
+      ],
+      "paths": [
+        "array"
+      ],
+      "target_parent": [
+        "array"
+      ]
+    },
     "move_selection": {
       "dx": [
         "number"
@@ -580,6 +591,11 @@
       "dy": "witnessed",
       "ids": "witnessed"
     },
+    "move_elements": {
+      "index": "witnessed",
+      "paths": "witnessed",
+      "target_parent": "witnessed"
+    },
     "move_selection": {
       "dx": "witnessed",
       "dy": "witnessed"
@@ -735,7 +751,6 @@
   "verbs_with_no_corpus_instance": [
     "apply_concept_operation",
     "group_selection",
-    "move_elements",
     "place_concept_instance",
     "promote_to_concept",
     "redo",

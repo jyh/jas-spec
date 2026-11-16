@@ -11,11 +11,19 @@ import Foundation
 /// BEFORE the move (the drop point resolves to elements before anything moves,
 /// DECISION S2-12); `[]` is the document root.
 ///
-/// THE ONE AUTHORITY FOR VALIDITY. ``MoveElements/check(_:paths:targetParent:filterActive:isolationRoot:)``
-/// states the five rules once; the op refuses through it by name, and the
-/// Layers tree's `drop_valid` (the indicator and the "not allowed" pointer) is
-/// computed by calling it (``MoveElements/check(model:paths:targetParent:)``),
-/// never by a second copy.
+/// THE ONE AUTHORITY FOR VALIDITY (spec §3, ERRATUM 1).
+/// ``MoveElements/check(_:paths:targetParent:filterActive:isolationRoot:)``
+/// states the five rules once, runs them IN THE ORDER LISTED (rule 1 for every
+/// dragged element in document order, then rule 2, then rule 3 for every
+/// element, then 4, then 5) and returns the FIRST failure's name. The op
+/// refuses through it, and the Layers tree's `drop_valid` (the indicator and
+/// the "not allowed" pointer) is computed by calling it
+/// (``MoveElements/check(model:paths:targetParent:)``), never by a second copy.
+///
+/// A REFUSED MOVE SUCCEEDS WITH NOTHING CHANGED: no error, no change, nothing
+/// journaled, no undo step. An empty `paths` is a no-op too (not a refusal).
+/// What stays an ERROR is a bad parameter or a missing target: an element or
+/// a parent that does not exist, and an `index` out of range.
 ///
 /// The op takes NO undo snapshot of its own: the `move_elements` action opens
 /// the step with its `snapshot` effect, and the op's write joins it
@@ -29,30 +37,43 @@ import Foundation
 /// `solo_saved` and `renaming_element` follow their elements. The document's
 /// element selection and target layer are remapped the same way.
 
-/// Why a move was refused, by name.
-public enum MoveElementsRefusal: String, Error, Equatable, CaseIterable {
-    /// No element to move (an empty panel selection).
-    case noElements = "no_elements"
-    /// A moved path names no element.
-    case missingElement = "missing_element"
-    /// `target_parent` names no element.
-    case missingParent = "missing_parent"
-    /// `target_parent` is not a layer or a group (nor the root).
-    case parentNotContainer = "parent_not_container"
+/// Which validity rule refused a move, by the spec's name (§3, ERRATUM 1).
+/// The cases are declared in the rules' order. A refusal is NOT an error: the
+/// op succeeds with nothing changed.
+public enum MoveElementsRefusal: String, Equatable, CaseIterable {
     /// Rule 1: the parent is a moved element or inside one.
-    case intoItself = "into_itself_or_descendant"
+    case intoItselfOrDescendant = "into_itself_or_descendant"
     /// Rule 2: the parent is locked, by its own flag or an ancestor's.
-    case parentLocked = "parent_locked"
-    /// Rule 3: a layer goes to the root or into a layer, never into a group.
-    case layerIntoGroup = "layer_into_group"
-    /// Rule 3: anything but a layer must live in a layer or a group.
-    case elementToRoot = "element_to_root"
+    case lockedParent = "locked_parent"
+    /// Rule 3 (both halves): a layer goes to the root or into a layer; anything
+    /// else goes into a layer or a group, never the root. A parent that is no
+    /// container at all fails both halves.
+    case wrongParentKind = "wrong_parent_kind"
     /// Rule 4: a search query or a type filter is active.
     case filterActive = "filter_active"
     /// Rule 5: in isolation, the parent is outside the isolated container.
     case outsideIsolation = "outside_isolation"
+}
+
+/// A move that is not a move at all: a bad parameter or a missing target.
+/// These stay ERRORS (spec §3, ERRATUM 1).
+public enum MoveElementsError: String, Error, Equatable, CaseIterable {
+    /// A moved path names no element.
+    case missingElement = "missing_element"
+    /// `target_parent` names no element.
+    case missingParent = "missing_parent"
     /// `index` is outside the parent's children after removal.
     case badIndex = "bad_index"
+}
+
+/// What a well-formed `move_elements` did.
+public enum MoveElementsEffect {
+    /// The elements moved.
+    case moved(MoveElements.Outcome)
+    /// A validity rule refused the move; nothing changed.
+    case refused(MoveElementsRefusal)
+    /// `paths` was empty; nothing changed.
+    case nothingToMove
 }
 
 public enum MoveElements {
@@ -110,42 +131,68 @@ public enum MoveElements {
 
     // MARK: - Validity (the one authority)
 
-    /// The five rules of `valid(sel, parent, index)` (spec §3), for EVERY
-    /// moved element; the first failure, by name, or nil when the move is
-    /// valid. Locked MOVED elements are allowed (lock protects content, not
-    /// position).
+    /// The missing targets, which are ERRORS and not refusals: the parent
+    /// first, then each moved element in document order. nil when every path
+    /// names an element (`[]` as the parent is the root; `[]` as a moved path
+    /// names nothing, since the root cannot move).
+    public static func missingTarget(_ doc: Document, paths: [ElementPath],
+                                     targetParent: ElementPath) -> MoveElementsError? {
+        if !targetParent.isEmpty, doc.tryGetElement(targetParent) == nil { return .missingParent }
+        for p in movedRoots(paths) where p.isEmpty || doc.tryGetElement(p) == nil {
+            return .missingElement
+        }
+        return nil
+    }
+
+    /// The five rules of `valid(sel, parent, index)` (spec §3, ERRATUM 1), run
+    /// IN THE ORDER LISTED, each for the dragged elements in DOCUMENT order;
+    /// the FIRST failure's name, or nil when no rule fails. Locked MOVED
+    /// elements are allowed (lock protects content, not position).
+    ///
+    /// An empty `paths` fails no rule (the op treats it as a no-op). A missing
+    /// element or parent is not a rule's business (``missingTarget(_:paths:targetParent:)``
+    /// reports it, and the op checks it first); a rule that needs the kind of
+    /// a missing element or parent passes it over.
     public static func check(_ doc: Document, paths: [ElementPath], targetParent: ElementPath,
                              filterActive: Bool, isolationRoot: ElementPath?) -> MoveElementsRefusal? {
         let moved = movedRoots(paths)
-        if moved.isEmpty { return .noElements }
-        // Rule 4: drag is disabled while filtering.
+        if moved.isEmpty { return nil }
+        // Rule 1: `parent` is not `e` and not a descendant of `e`.
+        for p in moved where !p.isEmpty && targetParent.starts(with: p) {
+            return .intoItselfOrDescendant
+        }
+        // Rule 2: `parent` is not locked, by its own flag or any ancestor's.
+        if doc.effectiveLocked(targetParent) { return .lockedParent }
+        // Rule 3: `e` is a layer ⇒ `parent` is the root or a layer; `e` is not
+        // a layer ⇒ `parent` is a layer or a group (never the root).
+        enum ParentKind { case root, layer, group, other, missing }
+        let kind: ParentKind
+        if targetParent.isEmpty {
+            kind = .root
+        } else {
+            switch doc.tryGetElement(targetParent) {
+            case .none: kind = .missing
+            case .some(.layer): kind = .layer
+            case .some(.group): kind = .group
+            case .some: kind = .other
+            }
+        }
+        if kind != .missing {
+            for p in moved where !p.isEmpty {
+                guard let e = doc.tryGetElement(p) else { continue }
+                let ok: Bool
+                if case .layer = e {
+                    ok = kind == .root || kind == .layer
+                } else {
+                    ok = kind == .layer || kind == .group
+                }
+                if !ok { return .wrongParentKind }
+            }
+        }
+        // Rule 4: no search query or type filter is active.
         if filterActive { return .filterActive }
-        // Rule 5: in isolation the parent is the isolated container or inside it.
+        // Rule 5: in isolation, `parent` is the isolated container or inside it.
         if let iso = isolationRoot, !targetParent.starts(with: iso) { return .outsideIsolation }
-        // The parent: the root, a layer or a group.
-        var parentIsLayer = targetParent.isEmpty
-        if !targetParent.isEmpty {
-            guard let parent = doc.tryGetElement(targetParent) else { return .missingParent }
-            switch parent {
-            case .layer: parentIsLayer = true
-            case .group: parentIsLayer = false
-            default: return .parentNotContainer
-            }
-        }
-        for p in moved {
-            guard let e = doc.tryGetElement(p), !p.isEmpty else { return .missingElement }
-            // Rule 1: not into itself, nor into its own descendants.
-            if targetParent.starts(with: p) { return .intoItself }
-            // Rule 3: a layer to the root or a layer; anything else to a layer
-            // or a group, never the root.
-            if case .layer = e {
-                if !targetParent.isEmpty && !parentIsLayer { return .layerIntoGroup }
-            } else if targetParent.isEmpty {
-                return .elementToRoot
-            }
-        }
-        // Rule 2: the parent is not locked, by its own flag or an ancestor's.
-        if doc.effectiveLocked(targetParent) { return .parentLocked }
         return nil
     }
 
@@ -191,19 +238,28 @@ public enum MoveElements {
         }
     }
 
-    /// Move the elements at `paths` to `index` under `targetParent` in `doc`,
-    /// or the refusal. Pure: the caller decides where the document goes.
+    /// Move the elements at `paths` to `index` under `targetParent` in `doc`.
+    /// Pure: the caller decides where the document goes. In order: an empty
+    /// `paths` is ``MoveElementsEffect/nothingToMove``; a missing parent or
+    /// element is an error; a rule's failure is ``MoveElementsEffect/refused(_:)``
+    /// (the index is then never read); an `index` out of range after removal
+    /// is an error; otherwise ``MoveElementsEffect/moved(_:)``.
     public static func apply(_ doc: Document, paths: [ElementPath], targetParent: ElementPath,
                              index: Int, filterActive: Bool = false,
-                             isolationRoot: ElementPath? = nil) -> Result<Outcome, MoveElementsRefusal> {
-        if let refusal = check(doc, paths: paths, targetParent: targetParent,
-                               filterActive: filterActive, isolationRoot: isolationRoot) {
-            return .failure(refusal)
-        }
+                             isolationRoot: ElementPath? = nil) -> Result<MoveElementsEffect, MoveElementsError> {
         let moved = movedRoots(paths)
+        if moved.isEmpty { return .success(.nothingToMove) }
+        if let missing = missingTarget(doc, paths: moved, targetParent: targetParent) {
+            return .failure(missing)
+        }
+        if let refusal = check(doc, paths: moved, targetParent: targetParent,
+                               filterActive: filterActive, isolationRoot: isolationRoot) {
+            return .success(.refused(refusal))
+        }
         let elements = moved.map { doc.getElement($0) }
         guard let parentAfter = pathAfterRemoval(targetParent, moved: moved) else {
-            return .failure(.intoItself)
+            // Unreachable: rule 1 refuses a parent inside a moved element.
+            return .success(.refused(.intoItselfOrDescendant))
         }
         // Remove, later siblings first, so every earlier path stays valid.
         var d = doc
@@ -222,7 +278,7 @@ public enum MoveElements {
             if p.count == 1 { selectedLayer = p[0] }
         }
         let finished = d.replacing(selectedLayer: selectedLayer, selection: selection)
-        return .success(Outcome(document: finished, moved: moved, parentAfter: parentAfter, index: index))
+        return .success(.moved(Outcome(document: finished, moved: moved, parentAfter: parentAfter, index: index)))
     }
 
     // MARK: - Panel state remap
@@ -300,42 +356,56 @@ public enum MoveElements {
 
     // MARK: - The op arm
 
+    /// What the op arm did, for the dispatcher.
+    enum OpResult: Equatable {
+        /// A bad parameter or a missing target: an error, nothing journaled.
+        case failed(OpApplyError)
+        /// Refused by a rule, or nothing to move: success with nothing
+        /// changed, so the dispatcher returns before `recordOp` and nothing is
+        /// journaled.
+        case unchanged
+        /// The elements moved; the dispatcher journals the op.
+        case moved
+    }
+
     /// The `move_elements` arm of ``opApply(_:_:_:)``: `{op: move_elements,
-    /// paths, target_parent, index}`. Refuses by name (nothing changes); on
-    /// success writes the document through ``Model/editDocument(_:)`` (joining
-    /// the action's transaction; no snapshot of its own) and remaps the
-    /// Layers panel's stored paths.
-    static func applyOp(_ model: Model, _ op: [String: Any]) -> OpApplyError? {
+    /// paths, target_parent, index}`. A refused or empty move is
+    /// ``OpResult/unchanged``; a moved one writes the document through
+    /// ``Model/editDocument(_:)`` (joining the action's transaction; no
+    /// snapshot of its own) and remaps the Layers panel's stored paths.
+    static func applyOp(_ model: Model, _ op: [String: Any]) -> OpResult {
         guard let rawPaths = op["paths"] as? [Any] else {
-            return op["paths"] == nil ? .missingParam(name: "paths") : .badParamType(name: "paths")
+            return .failed(op["paths"] == nil ? .missingParam(name: "paths") : .badParamType(name: "paths"))
         }
         var paths: [ElementPath] = []
         for entry in rawPaths {
-            guard let p = plainPath(entry) else { return .badParamType(name: "paths") }
+            guard let p = plainPath(entry) else { return .failed(.badParamType(name: "paths")) }
             paths.append(p)
         }
-        guard let rawParent = op["target_parent"] else { return .missingParam(name: "target_parent") }
-        guard let parent = plainPath(rawParent) else { return .badParamType(name: "target_parent") }
-        guard let rawIndex = op["index"] else { return .missingParam(name: "index") }
+        guard let rawParent = op["target_parent"] else { return .failed(.missingParam(name: "target_parent")) }
+        guard let parent = plainPath(rawParent) else { return .failed(.badParamType(name: "target_parent")) }
+        guard let rawIndex = op["index"] else { return .failed(.missingParam(name: "index")) }
         let index: Int
         if let n = rawIndex as? NSNumber, !n.isBool { index = n.intValue }
         else if let i = rawIndex as? Int { index = i }
-        else { return .badParamType(name: "index") }
+        else { return .failed(.badParamType(name: "index")) }
 
         switch apply(model.document, paths: paths, targetParent: parent, index: index,
                      filterActive: filterActive(model: model),
                      isolationRoot: isolationRoot(model: model)) {
-        case .failure(let refusal):
-            switch refusal {
+        case .failure(let error):
+            switch error {
             case .missingElement, .missingParent:
-                return .missingTarget(id: "move_elements: \(refusal.rawValue)")
-            default:
-                return .badParamType(name: "move_elements: \(refusal.rawValue)")
+                return .failed(.missingTarget(id: "move_elements: \(error.rawValue)"))
+            case .badIndex:
+                return .failed(.badParamType(name: "move_elements: \(error.rawValue)"))
             }
-        case .success(let outcome):
+        case .success(.nothingToMove), .success(.refused):
+            return .unchanged
+        case .success(.moved(let outcome)):
             model.editDocument(outcome.document)
             remapPanelState(model: model, outcome)
-            return nil
+            return .moved
         }
     }
 }

@@ -5783,6 +5783,14 @@ pub(crate) mod tests {
         run_operation_fixture("operations/set_target_layer.json");
     }
 
+    /// LAYERS-S2 §3 (ERRATUM 1): the Layers drop, `move_elements`. A valid
+    /// move, a move a rule refuses (succeeds, document unchanged) and an empty
+    /// move (a no-op).
+    #[test]
+    fn operation_move_elements() {
+        run_operation_fixture("operations/move_elements.json");
+    }
+
     /// `Object > Lock` STOPPED MATERIALIZING — transcripts/LAYER_STRUCTURE.md
     /// §13. The sibling of the family above, and the half of the repeal that
     /// was left behind: §13 repaired the Layers-panel path

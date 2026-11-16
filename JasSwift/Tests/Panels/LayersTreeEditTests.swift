@@ -367,7 +367,7 @@ import Foundation
         let before = m.document.layers
         #expect(Self.drag(m, [0, 0], [1], .into) == nil)
         #expect(m.document.layers == before)
-        #expect(LayersPanel.dropRefusal(LayersDropPoint(row: [1], zone: .into), model: m) == .parentLocked)
+        #expect(LayersPanel.dropRefusal(LayersDropPoint(row: [1], zone: .into), model: m) == .lockedParent)
     }
 
     @Test func aLockedElementCanBeDragged() {

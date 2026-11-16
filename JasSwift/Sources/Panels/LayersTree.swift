@@ -746,17 +746,24 @@ extension LayersPanel {
         }
     }
 
-    /// `drop_valid`: the drop point resolves and `move_elements`' own check
-    /// accepts it (the one authority; no second copy of the rules here).
+    /// `drop_valid`: the drop point resolves, there is something to move, every
+    /// path names an element, and `move_elements`' own check accepts it (the
+    /// one authority; no second copy of the rules here).
     public static func dropValid(_ point: LayersDropPoint, model: Model) -> Bool {
         guard let t = dropTarget(point, model: model) else { return false }
-        return MoveElements.check(model: model, paths: layersPanelSelection(model: model),
-                                  targetParent: t.parent) == nil
+        let paths = layersPanelSelection(model: model)
+        guard !MoveElements.movedRoots(paths).isEmpty,
+              MoveElements.missingTarget(model.document, paths: paths, targetParent: t.parent) == nil
+        else { return false }
+        return MoveElements.check(model: model, paths: paths, targetParent: t.parent) == nil
     }
 
-    /// Why the drop at `point` would be refused, by the op's name; nil when valid.
+    /// Why the drop at `point` would be refused, by the op's check's name; nil
+    /// when no rule refuses it. A point that resolves to no parent ("into" a
+    /// non-container, or a row naming no element) is reported as rule 3's
+    /// `wrong_parent_kind`, as the shell's only way to say "no valid parent".
     public static func dropRefusal(_ point: LayersDropPoint, model: Model) -> MoveElementsRefusal? {
-        guard let t = dropTarget(point, model: model) else { return .parentNotContainer }
+        guard let t = dropTarget(point, model: model) else { return .wrongParentKind }
         return MoveElements.check(model: model, paths: layersPanelSelection(model: model),
                                   targetParent: t.parent)
     }
