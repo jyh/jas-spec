@@ -735,6 +735,7 @@
   "verbs_with_no_corpus_instance": [
     "apply_concept_operation",
     "group_selection",
+    "move_elements",
     "place_concept_instance",
     "promote_to_concept",
     "redo",

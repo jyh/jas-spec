@@ -2539,6 +2539,36 @@ pub fn op_apply(model: &mut Model, op: &serde_json::Value) -> Result<(), OpError
             // into the recipe layer. The duplicate is exposed in the corpus
             // GOLDEN instead, where a ruling can move a visible byte.
         }
+        // The Layers panel's DROP (`actions.yaml` §move_elements, LAYERS-S2 §3):
+        // the dragged elements move, in document order, to `index` (document
+        // order, after removal) under `target_parent`. The five validity rules
+        // live ONLY in `move_elements::plan_move`. A rule refusal is Ok with
+        // nothing changed and nothing journaled (the frozen error taxonomy has
+        // no "refused" class: a refused op is answered "no", like a refused
+        // select); a malformed param or an absent path is an Err. No snapshot
+        // here: the action's own `snapshot` opens the one undo step. The
+        // document selection, the target layer and the model's isolation stack
+        // are carried through the move; the panel's stored paths are remapped
+        // by the `doc.op` effect with the same plan.
+        "move_elements" => {
+            use crate::document::move_elements::{self as mv, MoveError, ParamFault};
+            let planned = match mv::plan_from_op(model.document(), &model.isolation_stack, op) {
+                Ok(p) => p,
+                Err(ParamFault::Missing(name)) => return Err(OpError::MissingParam { name }),
+                Err(ParamFault::BadType(name)) => return Err(OpError::BadParamType { name }),
+            };
+            let plan = match planned {
+                Ok(plan) => plan,
+                Err(MoveError::NothingToMove) | Err(MoveError::Refused(_)) => return Ok(()),
+                Err(MoveError::MissingTarget(p)) | Err(MoveError::NotATreeRow(p)) => {
+                    return Err(OpError::MissingTarget { id: format!("{p:?}") });
+                }
+                Err(MoveError::IndexOutOfRange) => return Err(OpError::BadParamType { name: "index" }),
+            };
+            let new_doc = plan.apply(model.document());
+            model.edit_document(new_doc);
+            model.isolation_stack = model.isolation_stack.iter().map(|p| plan.remap(p)).collect();
+        }
         "unpack_group_at" => {
             let Some(path) = parse_path(op.get("path")) else {
                 return Err(req_err(op, "path"));

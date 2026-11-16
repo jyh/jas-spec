@@ -3166,9 +3166,13 @@ fn run_doc_effect(
         }
         "doc.op" => {
             let refused = match (spec.get("op").and_then(|v| v.as_str()), spec.as_object()) {
-                (Some(_), Some(fields)) => {
-                    let op = doc_op_args(fields, store, ctx);
-                    crate::document::op_apply::op_apply(model, &op).is_err()
+                (Some(verb), Some(fields)) => {
+                    let mut op = doc_op_args(fields, store, ctx);
+                    if verb == "move_elements" {
+                        run_move_elements(&mut op, store, model)
+                    } else {
+                        crate::document::op_apply::op_apply(model, &op).is_err()
+                    }
                 }
                 _ => true,
             };
@@ -3183,6 +3187,51 @@ fn run_doc_effect(
             report.unhandled.push(Unhandled::UnknownDocEffect(name.to_string()));
         }
     }
+}
+
+/// `doc.op: { op: move_elements, ... }` (the Layers drop). The rules' panel
+/// context the action does not pass — the Layers panel's `search_query`,
+/// `type_filter` and `isolation_stack` — is added from the panel's scope, so
+/// the op's own check (`move_elements::plan_move`, the one authority) sees it.
+/// After a move lands, EVERY path the Layers panel stores is remapped through
+/// the same plan (`move_elements::PANEL_PATH_KEYS`), and the panel selection
+/// becomes the moved elements' new paths. Returns `true` when the op layer
+/// refused the op for a fault (reported like any other `doc.op`).
+fn run_move_elements(op: &mut serde_json::Value, store: &mut StateStore, model: &mut Model) -> bool {
+    use crate::document::move_elements as mv;
+    const PANEL: &str = "layers";
+    for key in ["search_query", "type_filter", "isolation_stack"] {
+        if op.get(key).is_none() {
+            let v = store.get_panel(PANEL, key).clone();
+            if !v.is_null() {
+                op[key] = v;
+            }
+        }
+    }
+    let plan = match mv::plan_from_op(model.document(), &model.isolation_stack, op) {
+        Ok(Ok(plan)) => Some(plan),
+        _ => None,
+    };
+    if crate::document::op_apply::op_apply(model, op).is_err() {
+        return true;
+    }
+    let Some(plan) = plan else { return false };
+    for key in mv::PANEL_PATH_KEYS {
+        let old = store.get_panel(PANEL, key).clone();
+        let new = if *key == "layers_panel_selection" {
+            // The moved elements' new paths, in the store's path form.
+            let paths = mv::parse_path_list(op.get("paths")).unwrap_or_default();
+            serde_json::Value::Array(
+                paths.iter().map(|p| serde_json::json!({"__path__": plan.remap(p)})).collect(),
+            )
+        } else {
+            plan.remap_panel_value(key, &old)
+        };
+        if new != old && store.has_panel(PANEL) {
+            store.set_panel(PANEL, key, new);
+        }
+    }
+    false
 }
 
 /// A `doc.op` spec as the op layer reads it: `op` verbatim, every other
