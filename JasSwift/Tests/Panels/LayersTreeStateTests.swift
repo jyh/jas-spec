@@ -129,14 +129,19 @@ import Foundation
 
     /// S1 raised nothing on a second press; S2 opens the rename field from the
     /// NAME (LayersTreeEditTests). Outside the name the second press is the
-    /// isolation slice's and still raises nothing.
+    /// isolation slice's: S3 enters isolation on a container
+    /// (LayersTreeOpsTests); it never renames and never changes the selection.
     @Test func secondPressOutsideTheNameDoesNothing() {
         let m = Self.fixture()
         Self.clickName(m, [0])
         let raised = LayersPanel.treePress(region: .spacer, path: [0], clickCount: 2, model: m)
-        #expect(raised == nil)
+        #expect(raised == "enter_isolation_mode", "S3: the row's double-click isolates a container")
         #expect(Self.panelSel(m) == [[0]])
         #expect(LayersPanel.treeRenamingPath(model: m) == nil)
+        let leaf = Self.fixture()
+        Self.clickName(leaf, [1, 0])
+        #expect(LayersPanel.treePress(region: .spacer, path: [1, 0], clickCount: 2, model: leaf) == nil,
+                "a leaf's second press still raises nothing")
     }
 
     // MARK: - Element selection
@@ -303,7 +308,8 @@ import Foundation
         let m = Self.fixture()
         Self.clickName(m, [0])
         #expect(!LayersPanel.treeKey("v", mods: KeyMods(), model: m))
-        #expect(!LayersPanel.treeKey("Delete", mods: KeyMods(), model: m), "Delete is a later slice")
+        // (Delete was asserted here as "a later slice"; S3 made it a tree key:
+        // Tests/Panels/LayersTreeOpsTests.swift.)
         #expect(!LayersPanel.treeKey("ArrowUp", mods: KeyMods(shift: true), model: m))
         #expect(!LayersPanel.treeKey("a", mods: KeyMods(), model: m))
         #expect(Self.panelSel(m) == [[0]])

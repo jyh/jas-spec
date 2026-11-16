@@ -61,8 +61,11 @@ public enum LayersPanel {
              "exit_isolation_mode",
              "new_group",
              "flatten_artwork":
+            // S3: the item's `enabled_when` gates it (a disabled item claims
+            // its press without acting, DECISION S3-1) and the panel redraws
+            // after it (S1 §4): Panels/LayersTree.swift.
             if let m = model {
-                dispatchYamlAction(cmd, model: m)
+                runPanelMenuCommand(cmd, model: m)
             }
         default: break
         }

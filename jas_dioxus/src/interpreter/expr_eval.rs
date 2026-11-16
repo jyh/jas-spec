@@ -732,6 +732,27 @@ fn eval_func(
             }
         }
 
+        // The rows of an element_tree list whose path equals each of `paths`,
+        // in the order of `paths` (not the tree's); a path with no row is
+        // skipped. Layers' isolation breadcrumb (`lp_breadcrumb`) reads one
+        // row per isolation level through it. A path is read as `as_path`
+        // reads one (a list or a path marker). Null when `rows` is not a list
+        // or the arity is wrong; [] when `paths` is not a list.
+        "tree_rows_at" => {
+            if args.len() != 2 { return Value::Null; }
+            let Value::List(rows) = eval_inner(&args[0], ctx, scope, store_cb) else { return Value::Null };
+            let Value::List(paths) = eval_inner(&args[1], ctx, scope, store_cb) else { return Value::List(vec![]) };
+            let row_paths: Vec<Option<Vec<usize>>> = rows.iter()
+                .map(|r| r.get("path").and_then(|p| index_path(&Value::from_json(p))))
+                .collect();
+            let out = paths.iter()
+                .filter_map(|p| index_path(&Value::from_json(p)))
+                .filter_map(|p| row_paths.iter().position(|rp| rp.as_ref() == Some(&p)))
+                .map(|k| rows[k].clone())
+                .collect();
+            Value::List(out)
+        }
+
         "path_child" => {
             if args.len() != 2 { return Value::Null; }
             let p = eval_inner(&args[0], ctx, scope, store_cb);
@@ -2129,7 +2150,7 @@ mod tests {
 
 /// A PATH value, a list of non-negative integer indices, or a path marker (which
 /// `Value::from_json` already reads as a PATH) as indices; `None` for anything
-/// else. `as_path` and `tree_row_range` read their paths through it.
+/// else. `as_path`, `tree_row_range` and `tree_rows_at` read their paths through it.
 fn index_path(v: &Value) -> Option<Vec<usize>> {
     match v {
         Value::Path(p) => Some(p.clone()),

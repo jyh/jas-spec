@@ -25,6 +25,9 @@ struct LayersTreeView: View {
     let context: [String: Any]
     @ObservedObject var model: Model
     let theme: Theme?
+    /// S3: a menu item opened a dialog in the store (Options for Layer):
+    /// surface it through the panel's dialog bridge.
+    var onDialogOpened: (() -> Void)? = nil
     @StateObject private var shell = LayersTreeShell()
 
     var body: some View {
@@ -80,11 +83,14 @@ struct LayersTreeView: View {
                 }
                 .coordinateSpace(name: "lp_tree_scroll")
                 .onPreferenceChange(LayersTreeOffsetKey.self) { off in
+                    shell.scrollOffsetPx = Double(off)
                     let top = max(0, Int((off / layersRowHeight - 0.001).rounded(.up)))
                     if top != shell.scrollTop { shell.scrollTop = top }
                 }
                 .background(LayersTreeKeyCatcher(shell: shell, onKey: { event in
                     handleKey(event, proxy: proxy, height: geo.size.height)
+                }, onSecondary: { point, event, view in
+                    secondaryPress(at: point, event: event, view: view)
                 }))
                 .onChange(of: selection) { newSelection in
                     guard shell.takeSelectionChange(newSelection),
@@ -205,13 +211,58 @@ struct LayersTreeView: View {
         }
     }
 
+    // MARK: - S3: the context menu
+
+    /// A secondary press at `point` (measured from the tree's visible top-left):
+    /// the row under it (none below the last row, DECISION S3-2) is
+    /// panel-selected if it was not, then `context_menu:` pops up at the
+    /// pointer, above every row. A press outside it or Escape dismisses it
+    /// (the native menu's own tracking); a chosen item runs through the state
+    /// machine, and a dialog it opened (Options for Layer) is surfaced.
+    private func secondaryPress(at point: CGPoint, event: NSEvent, view: NSView) -> Bool {
+        let rows = LayersPanel.treeRows(model: model)
+        let y = Double(point.y) + shell.scrollOffsetPx
+        let idx = y >= 0 ? Int(y / Double(layersRowHeight)) : -1
+        let path = rows.indices.contains(idx) ? rows[idx]["path"] as? [Int] : nil
+        guard let open = LayersPanel.treeSecondaryPress(path: path, model: model, shell: shell) else {
+            return true
+        }
+        let target = LayersMenuTarget()
+        let sh = shell
+        let m = model
+        let opened = onDialogOpened
+        target.onPick = { index in
+            let before = m.stateStore.getDialogId()
+            sh.openMenu = open
+            LayersPanel.treeMenuChoose(index: index, model: m, shell: sh,
+                                       confirm: JasCommands.confirmOrphaningDelete)
+            if let now = m.stateStore.getDialogId(), now != before { opened?() }
+        }
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        for (i, item) in open.items.enumerated() {
+            if item.isSeparator { menu.addItem(.separator()); continue }
+            let mi = NSMenuItem(title: item.label, action: #selector(LayersMenuTarget.pick(_:)),
+                                keyEquivalent: "")
+            mi.target = target
+            mi.tag = i
+            mi.isEnabled = item.enabled
+            menu.addItem(mi)
+        }
+        NSMenu.popUpContextMenu(menu, with: event, for: view)
+        if !target.fired { LayersPanel.treeMenuDismiss(shell: shell) }
+        return true
+    }
+
     private func handleKey(_ event: NSEvent, proxy: ScrollViewProxy, height: CGFloat) -> Bool {
         // F2 arrives as a function-key character; the keyboard table names it.
         let key = event.keyCode == 120 ? "F2" : canonicalKeyName(event)
         let flags = event.modifierFlags
         let mods = KeyMods(shift: flags.contains(.shift), ctrl: flags.contains(.control),
                            alt: flags.contains(.option), cmd: flags.contains(.command))
-        guard LayersPanel.treeKey(key, mods: mods, model: model) else { return false }
+        // S3: Escape's order and the panel delete (with its orphan confirm).
+        guard LayersPanel.treeKey(key, mods: mods, model: model, shell: shell,
+                                  confirm: JasCommands.confirmOrphaningDelete) else { return false }
         // Reveal on keyboard move (spec §5).
         if key.hasPrefix("Arrow"), let focus = LayersPanel.treeFocusRow(model: model) {
             reveal(focus, proxy: proxy, height: height)
@@ -500,16 +551,30 @@ private struct LayersRenameField: NSViewRepresentable {
     }
 }
 
+/// The target of the context menu's items: remembers that one was picked and
+/// runs it.
+final class LayersMenuTarget: NSObject {
+    var onPick: ((Int) -> Void)?
+    private(set) var fired = false
+
+    @objc func pick(_ sender: NSMenuItem) {
+        fired = true
+        onPick?(sender.tag)
+    }
+}
+
 /// An invisible AppKit view that holds the tree's key focus (spec §3). A press
 /// in the tree makes it first responder; a press on the canvas or another
 /// panel takes first responder away, which is `key_focus = elsewhere`.
 private struct LayersTreeKeyCatcher: NSViewRepresentable {
     let shell: LayersTreeShell
     let onKey: (NSEvent) -> Bool
+    var onSecondary: ((CGPoint, NSEvent, NSView) -> Bool)? = nil
 
     func makeNSView(context: Context) -> LayersTreeKeyNSView {
         let v = LayersTreeKeyNSView()
         v.onKey = onKey
+        v.onSecondary = onSecondary
         let owner = shell
         v.onFocus = { [weak owner] focused in
             DispatchQueue.main.async { owner?.keyFocus = focused ? .tree : .elsewhere }
@@ -520,6 +585,7 @@ private struct LayersTreeKeyCatcher: NSViewRepresentable {
 
     func updateNSView(_ nsView: LayersTreeKeyNSView, context: Context) {
         nsView.onKey = onKey
+        nsView.onSecondary = onSecondary
         shell.keyView = nsView
     }
 }
@@ -527,8 +593,29 @@ private struct LayersTreeKeyCatcher: NSViewRepresentable {
 final class LayersTreeKeyNSView: NSView {
     var onKey: ((NSEvent) -> Bool)?
     var onFocus: ((Bool) -> Void)?
+    /// S3: a secondary press (right-click, Control-click) inside the tree's
+    /// visible frame, at a point measured from the frame's top-left. True
+    /// when it was handled (the event is then consumed).
+    var onSecondary: ((CGPoint, NSEvent, NSView) -> Bool)?
+    private var monitor: Any?
 
     override var acceptsFirstResponder: Bool { true }
+    override var isFlipped: Bool { true }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let m = monitor { NSEvent.removeMonitor(m); monitor = nil }
+        guard window != nil else { return }
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.rightMouseDown, .leftMouseDown]) { [weak self] event in
+            guard let self, let w = self.window, event.window === w else { return event }
+            let secondary = event.type == .rightMouseDown
+                || (event.type == .leftMouseDown && event.modifierFlags.contains(.control))
+            guard secondary else { return event }
+            let p = self.convert(event.locationInWindow, from: nil)
+            guard self.bounds.contains(p), self.onSecondary?(p, event, self) == true else { return event }
+            return nil
+        }
+    }
 
     override func becomeFirstResponder() -> Bool {
         onFocus?(true)

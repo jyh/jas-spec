@@ -1282,6 +1282,29 @@ private func evalFunc(_ name: String, _ args: [Expr], _ ctx: [String: Any]) -> V
         }
         return .list(out.map { AnyJSON(["__path__": $0] as [String: Any]) })
 
+    // The rows of an element_tree list whose path equals each of `paths`, IN
+    // THE ORDER OF `paths` (not the tree's); a path with no row is skipped
+    // (SCHEMA.md `tree_rows_at`; Layers' isolation breadcrumb reads one row
+    // per isolation level). A path is a list or a path marker, read as
+    // `as_path` reads one. Not two arguments, or `rows` not a list: null.
+    // `paths` not a list: the empty list.
+    case "tree_rows_at":
+        guard args.count == 2, case .list(let rows) = evalNode(args[0], ctx) else { return .null }
+        guard case .list(let wanted) = evalNode(args[1], ctx) else { return .list([]) }
+        let rowPaths: [[Int]?] = rows.map { r in
+            (r.value as? [String: Any])?["path"].flatMap { indexPath(Value.fromJson($0)) }
+        }
+        var out: [AnyJSON] = []
+        for w in wanted {
+            // A list literal holds its evaluated elements as `Value`s
+            // (`[path(0)]`); a stored list holds JSON (a list or a marker).
+            let wv = (w.value as? Value) ?? Value.fromJson(w.value)
+            guard let p = indexPath(wv),
+                  let k = rowPaths.firstIndex(where: { $0 == p }) else { continue }
+            out.append(rows[k])
+        }
+        return .list(out)
+
     case "path_child":
         guard args.count == 2 else { return .null }
         let p = evalNode(args[0], ctx)

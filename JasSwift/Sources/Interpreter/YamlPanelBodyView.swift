@@ -2483,7 +2483,10 @@ struct YamlElementView: View {
     @ViewBuilder
     private func renderTreeView() -> some View {
         if let model = model {
-            LayersTreeView(element: element, context: context, model: model, theme: theme)
+            // S3: a context-menu item that opens a dialog (Options for
+            // Layer) is surfaced through the panel's dialog bridge.
+            LayersTreeView(element: element, context: context, model: model, theme: theme,
+                           onDialogOpened: { onStoreDialogOpened?(nil) })
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             EmptyView()
