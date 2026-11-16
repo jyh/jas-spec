@@ -3506,7 +3506,7 @@ class CanvasNSView: NSView {
             // Layers isolation (LAYERS-S3 §1): content outside the isolated
             // container is drawn at 10 % opacity, the container at full.
             ctx.saveGState()
-            ctx.setAlpha(0.1)
+            ctx.setAlpha(0.1) // not-a-viewport-pref: isolation dimming, "dimmed to 10% opacity" (enter_isolation_mode)
             ctx.beginTransparencyLayer(auxiliaryInfo: nil)
             for layer in split.background { drawElement(ctx, .layer(layer)) }
             ctx.endTransparencyLayer()
