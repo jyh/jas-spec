@@ -1219,14 +1219,23 @@ private func transformedCanonicalDocument() -> Document {
     try runOperationFixture("move_elements.json", named: ["an_empty_move_is_a_no_op"])
 }
 
-/// The file holds exactly the three cases claimed above, so a case added to
+/// ERRATUM 3 (decision S2-15): the paths hold a group AND its own child; the
+/// set is reduced to its roots, so the child travels inside the group at its
+/// unchanged path within it and is never placed under the target on its own.
+@Test func operationMoveElementsAnElementWithItsDescendant() throws {
+    try runOperationFixture("move_elements.json",
+                            named: ["moving_an_element_with_its_descendant_moves_only_the_root"])
+}
+
+/// The file holds exactly the four cases claimed above, so a case added to
 /// it later cannot go unclaimed by this port.
 @Test func operationMoveElementsEveryCaseIsClaimed() throws {
     let tests = try JSONSerialization.jsonObject(with: Data(readFixture("operations/move_elements.json").utf8))
         as! [[String: Any]]
     #expect(tests.compactMap { $0["name"] as? String }.sorted()
             == ["a_move_refused_by_a_rule_changes_nothing", "an_empty_move_is_a_no_op",
-                "moving_a_leaf_to_the_top_of_its_layer"])
+                "moving_a_leaf_to_the_top_of_its_layer",
+                "moving_an_element_with_its_descendant_moves_only_the_root"])
 }
 
 /// `state.boolean_remove_redundant_points` defaults to FALSE

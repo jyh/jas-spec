@@ -14,8 +14,14 @@ import Foundation
 /// THE ONE AUTHORITY FOR VALIDITY (spec §3, ERRATUM 1).
 /// ``MoveElements/check(_:paths:targetParent:filterActive:isolationRoot:)``
 /// states the five rules once, runs them IN THE ORDER LISTED (rule 1 for every
-/// dragged element in document order, then rule 2, then rule 3 for every
-/// element, then 4, then 5) and returns the FIRST failure's name. The op
+/// dragged ROOT in document order, then rule 2, then rule 3 for every root,
+/// then 4, then 5) and returns the FIRST failure's name. The op
+///
+/// THE DRAGGED SET IS FIRST REDUCED TO ITS ROOTS (ERRATUM 3, decision S2-15;
+/// ``movedRoots(_:)``): a path whose proper ancestor is also given is dropped;
+/// that element travels inside its ancestor at its unchanged path within it,
+/// and is never checked or placed under the target on its own. `index` counts
+/// the target parent's children that are not being moved.
 /// refuses through it, and the Layers tree's `drop_valid` (the indicator and
 /// the "not allowed" pointer) is computed by calling it
 /// (``MoveElements/check(model:paths:targetParent:)``), never by a second copy.
