@@ -271,6 +271,49 @@ mod tests {
         }
     }
 
+    /// `tree_rows_at` (the Layers breadcrumb's foreach source, `lp_breadcrumb`):
+    /// the fixture's `rows_at_cases` over case 0's document, with the paths as
+    /// lists and again as path markers (as `panel.isolation_stack` holds them).
+    #[test]
+    fn tree_rows_at_matches_the_shared_fixture() {
+        let raw = include_str!(concat!("../../../test_fixtures/", "layers/element_tree.json"));
+        let fx: Value = serde_json::from_str(raw).unwrap();
+        let doc = crate::geometry::test_json::test_json_to_document(&fx["cases"][0]["document"].to_string());
+        let rows = element_tree(&doc);
+        let cases = fx["rows_at_cases"].as_array().unwrap();
+        assert!(cases.len() >= 4, "the fixture is not vacuous");
+        for case in cases {
+            let lists = case["paths"].clone();
+            let markers: Vec<Value> = lists.as_array().unwrap().iter()
+                .map(|p| json!({"__path__": p})).collect();
+            for (form, paths) in [("lists", lists), ("markers", Value::Array(markers))] {
+                let ctx = json!({
+                    "active_document": {"element_tree": rows},
+                    "panel": {"isolation_stack": paths},
+                });
+                let got = crate::interpreter::expr::eval(
+                    "tree_rows_at(active_document.element_tree, panel.isolation_stack)", &ctx);
+                assert_eq!(got, crate::interpreter::expr_types::Value::List(
+                    case["expected"].as_array().unwrap().clone()), "{} ({form})", case["name"]);
+            }
+        }
+    }
+
+    /// `tree_rows_at`'s edges: null when `rows` is not a list or the arity is
+    /// wrong; [] when `paths` is not a list.
+    #[test]
+    fn tree_rows_at_edges() {
+        use crate::interpreter::expr_types::Value as V;
+        let ctx = json!({"rows": [{"path": [0]}], "paths": [[0]]});
+        let eval = |s: &str| crate::interpreter::expr::eval(s, &ctx);
+        assert_eq!(eval("tree_rows_at(null, paths)"), V::Null);
+        assert_eq!(eval("tree_rows_at(rows)"), V::Null);
+        assert_eq!(eval("tree_rows_at(rows, paths, paths)"), V::Null);
+        assert_eq!(eval("tree_rows_at(rows, null)"), V::List(vec![]));
+        assert_eq!(eval("tree_rows_at(rows, 3)"), V::List(vec![]));
+        assert_eq!(eval("tree_rows_at(rows, paths)"), V::List(vec![json!({"path": [0]})]));
+    }
+
     /// Step 1b: the rows to draw, resolved from `element_tree` and the
     /// widget's binds (the fixture's `visible_cases`, flask §591).
     #[test]
