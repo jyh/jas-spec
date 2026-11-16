@@ -26,43 +26,47 @@ use std::rc::Rc;
 use crate::document::document::{Document, ElementPath, ElementSelection};
 use crate::geometry::element::Element;
 
-/// Why a drop is refused: the five validity rules, by name (spec §3).
+/// Why a drop is refused: the five validity rules, by name (spec §3, ERRATUM 1).
+/// The check returns the FIRST failure: the dragged elements are taken in
+/// document order and, for each, rules 1–5 in the order listed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MoveRefusal {
     /// Rule 1: the target parent is a dragged element or inside one.
-    IntoItself,
+    IntoItselfOrDescendant,
     /// Rule 2: the target parent is locked, by its own flag or an ancestor's.
     LockedParent,
     /// Rule 3: a layer goes only to the root or a layer; anything else only to
     /// a layer or a group (never the root).
     WrongParentKind,
     /// Rule 4: a search query or a type filter is active.
-    Filtering,
+    FilterActive,
     /// Rule 5: in isolation, the target parent is not the isolated container
     /// or inside it.
     OutsideIsolation,
 }
 
 impl MoveRefusal {
-    /// The refusal's stable name.
+    /// The refusal's name, exactly as spec §3 (ERRATUM 1) spells it.
     pub fn name(&self) -> &'static str {
         match self {
-            MoveRefusal::IntoItself => "into_itself",
+            MoveRefusal::IntoItselfOrDescendant => "into_itself_or_descendant",
             MoveRefusal::LockedParent => "locked_parent",
             MoveRefusal::WrongParentKind => "wrong_parent_kind",
-            MoveRefusal::Filtering => "filtering",
+            MoveRefusal::FilterActive => "filter_active",
             MoveRefusal::OutsideIsolation => "outside_isolation",
         }
     }
 }
 
-/// Everything that stops a move. Only [`MoveError::Refused`] is a rule; the
-/// others are malformed or absent operands.
+/// Everything that stops a move. [`MoveError::Refused`] (a rule) and
+/// [`MoveError::NothingToMove`] (empty `paths`) are NOT errors at the op
+/// layer: the op succeeds with nothing changed. The others are malformed or
+/// absent operands and stay errors.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MoveError {
-    /// One of the five validity rules failed.
+    /// One of the five validity rules failed. The op succeeds, unchanged.
     Refused(MoveRefusal),
-    /// The paths list is empty: nothing to move.
+    /// The paths list is empty: a no-op, not a refusal.
     NothingToMove,
     /// A dragged path or the target parent names no element.
     MissingTarget(ElementPath),
@@ -100,11 +104,13 @@ pub struct MovePlan {
 
 /// Validate and plan a move. The one authority for the five rules.
 ///
-/// Checks, in order: an empty `paths` ⇒ [`MoveError::NothingToMove`]; every
-/// path and the parent resolve ⇒ else [`MoveError::MissingTarget`]; every
-/// dragged path is a tree row; then, for every dragged element in document
-/// order, rules 1–5; finally `index` is within the parent's children after
-/// removal.
+/// Checks, in order: an empty `paths` ⇒ [`MoveError::NothingToMove`] (a
+/// no-op); every path and the parent resolve ⇒ else
+/// [`MoveError::MissingTarget`]; every dragged path is a tree row; then, for
+/// every dragged element in document order, rules 1–5 in the order listed,
+/// returning the FIRST failure ([`MoveError::Refused`], whose
+/// [`MoveRefusal::name`] is the spec's name); finally `index` is within the
+/// parent's children after removal.
 pub fn plan_move(
     doc: &Document,
     paths: &[ElementPath],
@@ -142,7 +148,7 @@ pub fn plan_move(
     for p in &moved {
         // Rule 1: not the element itself, nor inside it.
         if target_parent.starts_with(p) {
-            return Err(MoveError::Refused(MoveRefusal::IntoItself));
+            return Err(MoveError::Refused(MoveRefusal::IntoItselfOrDescendant));
         }
         // Rule 2: the parent is not locked (inherited). The root is never locked.
         if doc.effective_locked(target_parent) {
@@ -158,7 +164,7 @@ pub fn plan_move(
         }
         // Rule 4: no search query or type filter active.
         if ctx.filtering {
-            return Err(MoveError::Refused(MoveRefusal::Filtering));
+            return Err(MoveError::Refused(MoveRefusal::FilterActive));
         }
         // Rule 5: in isolation, the parent is the isolated container or inside it.
         if !ctx.isolation_stack.iter().all(|iso| target_parent.starts_with(iso)) {
@@ -592,19 +598,82 @@ mod tests {
             }
         };
         // Rule 1: into itself, and into its own descendant.
-        assert_eq!(refused(&[vec![0, 1]], vec![0, 1], &none), MoveRefusal::IntoItself);
-        assert_eq!(refused(&[vec![0]], vec![0, 1], &none), MoveRefusal::IntoItself);
+        assert_eq!(refused(&[vec![0, 1]], vec![0, 1], &none), MoveRefusal::IntoItselfOrDescendant);
+        assert_eq!(refused(&[vec![0]], vec![0, 1], &none), MoveRefusal::IntoItselfOrDescendant);
         // Rule 3: a layer into a group; a leaf to the root; anything into a leaf.
         assert_eq!(refused(&[vec![1]], vec![0, 1], &none), MoveRefusal::WrongParentKind);
         assert_eq!(refused(&[vec![0, 0]], vec![], &none), MoveRefusal::WrongParentKind);
         assert_eq!(refused(&[vec![0, 0]], vec![0, 2], &none), MoveRefusal::WrongParentKind);
         // Rule 4: while filtering.
         let filtering = MoveContext { filtering: true, ..Default::default() };
-        assert_eq!(refused(&[vec![0, 0]], vec![1], &filtering), MoveRefusal::Filtering);
+        assert_eq!(refused(&[vec![0, 0]], vec![1], &filtering), MoveRefusal::FilterActive);
         // Rule 5: isolated in G, a drop into L2 is outside; into G itself is fine.
         let iso = MoveContext { isolation_stack: vec![vec![0], vec![0, 1]], ..Default::default() };
         assert_eq!(refused(&[vec![0, 1, 0]], vec![1], &iso), MoveRefusal::OutsideIsolation);
         assert!(drop_valid(&d, &[vec![0, 1, 0]], &vec![0, 1], 0, &iso));
+    }
+
+    /// ERRATUM 1: the names are exactly the spec's.
+    #[test]
+    fn refusal_names_are_the_specs() {
+        let names: Vec<&str> = [
+            MoveRefusal::IntoItselfOrDescendant,
+            MoveRefusal::LockedParent,
+            MoveRefusal::WrongParentKind,
+            MoveRefusal::FilterActive,
+            MoveRefusal::OutsideIsolation,
+        ]
+        .iter()
+        .map(|r| r.name())
+        .collect();
+        assert_eq!(names, vec!["into_itself_or_descendant", "locked_parent", "wrong_parent_kind",
+                               "filter_active", "outside_isolation"]);
+    }
+
+    /// ERRATUM 1: the check returns the FIRST failure: rules in the order
+    /// listed, for the dragged elements in document order.
+    #[test]
+    fn the_first_failure_is_returned() {
+        let mut d = doc();
+        // G ([0,1]) locked: into G fails rules 1, 2 (and 3 for a layer).
+        d.get_element_mut(&vec![0, 1]).unwrap().common_mut().locked = true;
+        let all = MoveContext { filtering: true, isolation_stack: vec![vec![1]] };
+        let first = |paths: &[ElementPath], parent: ElementPath| match plan_move(&d, paths, &parent, 0, &all) {
+            Err(MoveError::Refused(r)) => r.name(),
+            other => panic!("expected a refusal, got {other:?}"),
+        };
+        // L1 into its own child G: fails all five; rule 1 is reported.
+        assert_eq!(first(&[vec![0]], vec![0, 1]), "into_itself_or_descendant");
+        // `a` into the locked G (also filtering, outside isolation): rule 2.
+        assert_eq!(first(&[vec![0, 0]], vec![0, 1]), "locked_parent");
+        // `a` to the root (also filtering, outside isolation): rule 3.
+        assert_eq!(first(&[vec![0, 0]], vec![]), "wrong_parent_kind");
+        // `a` into L1 (also outside isolation): rule 4.
+        assert_eq!(first(&[vec![0, 0]], vec![0]), "filter_active");
+        // Document order: `a` ([0,0], to the root: rule 3) is checked before
+        // L2 ([1], to the root: valid), whatever order the paths are given in.
+        assert_eq!(first(&[vec![1], vec![0, 0]], vec![]), "wrong_parent_kind");
+        // `e` into L1, isolated in L2 only: rule 5.
+        let iso = MoveContext { filtering: false, isolation_stack: vec![vec![1]] };
+        assert_eq!(plan_move(&d, &[vec![1, 0]], &vec![0], 0, &iso),
+                   Err(MoveError::Refused(MoveRefusal::OutsideIsolation)));
+        assert_eq!(MoveRefusal::OutsideIsolation.name(), "outside_isolation");
+    }
+
+    /// ERRATUM 1: a refused move SUCCEEDS with nothing changed, nothing
+    /// journaled and no undo step, also under the action's own `snapshot`.
+    #[test]
+    fn a_refused_move_under_the_actions_snapshot_leaves_no_trace() {
+        let mut m = model_of(doc());
+        let journal = m.journal_head();
+        op_apply(&mut m, &json!({"op": "snapshot"})).unwrap();
+        let r = op_apply(&mut m, &json!({"op": "move_elements", "paths": [[0]], "target_parent": [0, 1],
+                                         "index": 0}));
+        m.commit_txn();
+        assert_eq!(r, Ok(()));
+        assert_eq!(tree(m.document()), tree(&doc()));
+        assert_eq!(m.journal_head(), journal, "nothing journaled");
+        assert!(!m.can_undo(), "no undo step");
     }
 
     #[test]

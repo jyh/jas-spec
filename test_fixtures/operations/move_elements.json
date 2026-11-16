@@ -1,0 +1,41 @@
+[
+  {
+    "_doc": [
+      "move_elements {paths, target_parent, index} (LAYERS-S2 interaction spec §3, ERRATUM 1): the Layers panel's drop.",
+      "The dragged elements leave their places and are inserted, in their original document order, at `index` under",
+      "`target_parent`; `index` counts the parent's children in document (z) order, 0 = the bottom child, read AFTER",
+      "removal. A valid move: the bottom rect [0,0] goes on top of its sibling (index 1 after removal), so the two",
+      "rects swap. One undoable transaction."
+    ],
+    "name": "moving_a_leaf_to_the_top_of_its_layer",
+    "setup_svg": "two_rects.svg",
+    "txns": [
+      {"name": "move_elements", "ops": [{"op": "move_elements", "paths": [[0, 0]], "target_parent": [0], "index": 1}]}
+    ],
+    "expected_json": "move_elements_leaf_to_top_expected.json"
+  },
+  {
+    "_doc": [
+      "A move a validity rule refuses SUCCEEDS with nothing changed (no error, nothing journaled, no undo step):",
+      "the layer [0] dropped into itself fails rule 1, into_itself_or_descendant. The document is the setup, so the",
+      "case pins to lock_toggle_noop_expected.json (two_rects.svg unchanged)."
+    ],
+    "name": "a_move_refused_by_a_rule_changes_nothing",
+    "setup_svg": "two_rects.svg",
+    "txns": [
+      {"name": "move_elements", "ops": [{"op": "move_elements", "paths": [[0]], "target_parent": [0], "index": 0}]}
+    ],
+    "expected_json": "lock_toggle_noop_expected.json"
+  },
+  {
+    "_doc": [
+      "An empty `paths` is a no-op, not a refusal and not an error: the document is the setup."
+    ],
+    "name": "an_empty_move_is_a_no_op",
+    "setup_svg": "two_rects.svg",
+    "txns": [
+      {"name": "move_elements", "ops": [{"op": "move_elements", "paths": [], "target_parent": [0], "index": 0}]}
+    ],
+    "expected_json": "lock_toggle_noop_expected.json"
+  }
+]
