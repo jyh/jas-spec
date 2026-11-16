@@ -3501,6 +3501,17 @@ class CanvasNSView: NSView {
         if let path = isolationPath,
            let mask = document.getElement(path).mask {
             drawElement(ctx, mask.subtreeElement)
+        } else if let root = controller?.model.layersIsolationStack.last,
+                  let split = LayersPanel.isolationCanvasLayers(document, root: root) {
+            // Layers isolation (LAYERS-S3 §1): content outside the isolated
+            // container is drawn at 10 % opacity, the container at full.
+            ctx.saveGState()
+            ctx.setAlpha(0.1)
+            ctx.beginTransparencyLayer(auxiliaryInfo: nil)
+            for layer in split.background { drawElement(ctx, .layer(layer)) }
+            ctx.endTransparencyLayer()
+            ctx.restoreGState()
+            for layer in split.foreground { drawElement(ctx, .layer(layer)) }
         } else {
             for layer in document.layers {
                 drawElement(ctx, .layer(layer))

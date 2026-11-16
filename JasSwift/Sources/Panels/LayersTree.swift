@@ -15,12 +15,12 @@
 /// drag-and-drop, whose drop runs the `move_elements` action
 /// (Document/MoveElements.swift holds the op and its one validity check).
 ///
-/// Later slices plug in here rather than around it: isolation (double-click
-/// on a container row), Delete and the context menu arrive as further events
-/// through the same template lookup (``LayersPanel/pressAction``) and the same
-/// keyboard table (``LayersPanel/treeKey``), gated today by
-/// ``LayersPanel/s1TreeKeys`` + ``LayersPanel/s2TreeKeys`` and
-/// ``LayersPanel/s2DoubleClickActions``.
+/// Slice S3 (spec_inputs/LAYERS-S3-interaction-spec.md) plugs in here rather
+/// than around it: isolation (a double-click on a container row, through the
+/// same template lookup, ``LayersPanel/s3DoubleClickActions``), Escape's order
+/// and Delete (``LayersPanel/treeKey``), the panel menu and the context menu
+/// (``LayersPanel/treeSecondaryPress``), the breadcrumb, and the canvas's
+/// isolation split. See the "S3" section at the end of this file.
 
 import AppKit
 import Foundation
@@ -105,6 +105,13 @@ public final class LayersTreeShell: ObservableObject {
     /// The view's pointer gesture is in progress (its first move tried to
     /// start a drag), whether or not a drag started.
     var dragGestureOpen: Bool = false
+    /// S3: the menu open over the panel (the panel menu or a row's context
+    /// menu), or nil. It is above every row; Escape and a press outside it
+    /// close it (S3 §1).
+    @Published public var openMenu: LayersOpenMenu? = nil
+    /// The tree's vertical scroll offset in points (the view's measure of
+    /// `scroll_top`), so a secondary press finds the row under the pointer.
+    var scrollOffsetPx: Double = 0
 
     public init() {}
 
@@ -416,6 +423,11 @@ extension LayersPanel {
     /// every view reading the panel store to redraw (spec §4).
     static func runTreeAction(_ action: String, params: [String: Any], model: Model) {
         ensureLayersScope(model)
+        // The tree's event is the Layers panel's: it becomes the ACTIVE panel
+        // first, so an effect's `set_panel_state` with no `panel:` key
+        // (`delete_layer_selection`'s `layers_panel_selection: []`) writes
+        // THIS panel's state, as `panelDispatch` does for a panel menu.
+        model.stateStore.setActivePanel(panelContentId)
         normalizeCollapsedPaths(model)
         dispatchYamlAction(action, model: model, params: params)
         model.panelStateVersion &+= 1
@@ -455,10 +467,13 @@ extension LayersPanel {
         if clickCount >= 2 {
             guard let hit = pressAction(region: region, node: node, mods: mods,
                                         event: "double_click", model: model),
-                  s2DoubleClickActions.contains(hit.action),
+                  s2DoubleClickActions.contains(hit.action)
+                    || (s3DoubleClickActions.contains(hit.action)
+                        && s3IsolationRegions.contains(region)),
                   actionEnabled(hit.action, model: model)
             else { return nil }
             runTreeAction(hit.action, params: hit.params, model: model)
+            if let sh = shell { notePanelAct(model: model, shell: sh) }
             return hit.action
         }
         guard let hit = pressAction(region: region, node: node, mods: mods, model: model)
@@ -500,9 +515,30 @@ extension LayersPanel {
     /// and this table is not consulted at all (DECISION S2-1). Under a search
     /// or type filter the arrow keys reach only SHOWN rows (S2 §2), as the
     /// plain row selection a nav move is (``treeFilteredNav(_:model:)``).
+    ///
+    /// S3: Escape takes its one-key, three-meaning order
+    /// (``treeEscape(model:shell:)``), and Delete / Backspace delete the PANEL
+    /// selection (``treeDeleteSelection(model:shell:confirm:)``, with its
+    /// orphan intercept; `confirm` presents the warn-then-orphan confirm).
     @discardableResult
-    public static func treeKey(_ key: String, mods: KeyMods, model: Model) -> Bool {
+    public static func treeKey(_ key: String, mods: KeyMods, model: Model,
+                               shell: LayersTreeShell? = nil,
+                               confirm: ((Int) -> Bool)? = nil) -> Bool {
+        // An open menu has the keyboard: Escape closes it (and does nothing
+        // else, S3 §1); no other key reaches the tree beneath it.
+        if shell?.openMenu != nil {
+            if key == "Escape" { shell?.openMenu = nil }
+            return true
+        }
         if layersRenamingPath(model: model) != nil { return false }
+        if key == "Escape", !mods.cmd, !mods.ctrl, !mods.alt, !mods.shift {
+            treeEscape(model: model, shell: shell)
+            return true
+        }
+        if s3DeleteKeys.contains(key), !mods.cmd, !mods.ctrl, !mods.alt, !mods.shift {
+            treeDeleteSelection(model: model, shell: shell, confirm: confirm)
+            return true
+        }
         guard let tree = treeSpec(), let ws = WorkspaceData.load() else { return false }
         let keys = s1TreeKeys.union(s2TreeKeys)
         let rows = ((tree["keyboard"] as? [Any]) ?? []).filter { row in
@@ -892,5 +928,371 @@ extension LayersPanel {
         treeDragMove(to: point, nowMs: 0, model: model, shell: sh)
         treeDragHoverTick(nowMs: hoverMs, model: model, shell: sh)
         return treeDragEnd(model: model, shell: sh)
+    }
+}
+
+// MARK: - S3: the panel menu, the context menu, isolation, delete, Options for Layer
+// (spec_inputs/LAYERS-S3-interaction-spec.md §1)
+
+/// Which menu is open over the panel.
+public enum LayersMenuKind: Equatable {
+    /// The panel's hamburger menu (layers.yaml `menu:`).
+    case panel
+    /// A row's context menu (`lp_tree.context_menu:`), with `node` bound.
+    case context
+}
+
+/// One item of an open menu, evaluated when the menu OPENED (S3 §1): its
+/// label, its action and params, and whether it is enabled.
+public struct LayersMenuItem {
+    public let label: String
+    /// The action the item raises ("" for a separator or an item with none).
+    public let action: String
+    public let params: [String: Any]
+    /// `enabled_when` held at open (true when the item declares none). A
+    /// disabled item is drawn dimmed and claims its press without acting.
+    public let enabled: Bool
+    public let isSeparator: Bool
+
+    static let separator = LayersMenuItem(label: "", action: "", params: [:], enabled: false, isSeparator: true)
+}
+
+/// A menu open over the panel: its kind, the row it was opened on (context
+/// menus only) and its items as evaluated at open.
+public struct LayersOpenMenu {
+    public let kind: LayersMenuKind
+    public let row: [Int]?
+    public let items: [LayersMenuItem]
+}
+
+/// What one Escape did (S3 §1, "Escape's order"): exactly one of these.
+public enum LayersEscapeOutcome: Equatable {
+    case closedMenu
+    case cancelledRename
+    case exitedIsolationLevel
+    case nothing
+}
+
+extension LayersPanel {
+
+    /// The `double_click` actions S3 raises: the row's own `enter_isolation_mode`
+    /// (its condition already excludes the name, which renames).
+    public static let s3DoubleClickActions: Set<String> = ["enter_isolation_mode"]
+
+    /// The row regions whose double-click can enter isolation: the ones that
+    /// panel-select (S1 §2: spacer, leaf gap, preview; the name renames). The
+    /// eye, lock, twirl and select square are buttons whose presses are their
+    /// own clicks, so a double-click on one never isolates (DECISION, see
+    /// SYNTH-NOTES.md).
+    static let s3IsolationRegions: Set<LayersRowRegion> = [.spacer, .leafGap, .preview]
+
+    /// The S3 rows of `lp_tree`'s `keyboard:` table that delete.
+    public static let s3DeleteKeys: Set<String> = ["Delete", "Backspace"]
+
+    /// After a panel act: the element selection it leaves is the panel's own,
+    /// so it does not reveal (DECISION S3-3: a panel act scrolls nothing).
+    static func notePanelAct(model: Model, shell: LayersTreeShell) {
+        shell.panelMadeSelection = model.document.selection.map(\.path)
+    }
+
+    /// Run one S3 action through the yaml pipeline (S1 §4's full recompute
+    /// follows: ``runTreeAction`` bumps the panel version).
+    static func runPanelAct(_ action: String, params: [String: Any] = [:],
+                            model: Model, shell: LayersTreeShell?) {
+        runTreeAction(action, params: params, model: model)
+        if let sh = shell { notePanelAct(model: model, shell: sh) }
+    }
+
+    // MARK: Menus
+
+    /// A menu entry's params, evaluated in `ctx` the way a row behaviour's are
+    /// (a bare identifier that evaluates to nothing is the literal: `mode: edit`).
+    private static func menuParams(_ raw: [String: Any], ctx: [String: Any]) -> [String: Any] {
+        var params: [String: Any] = [:]
+        for (k, v) in raw {
+            guard let expr = v as? String else { params[k] = v; continue }
+            if let any = storedValue(evaluate(expr, context: ctx)) {
+                params[k] = any
+            } else if isBareIdentifier(expr) {
+                params[k] = expr
+            }
+        }
+        return params
+    }
+
+    /// Text that may carry `{{…}}` regions, evaluated in `ctx`.
+    private static func menuText(_ raw: String, ctx: [String: Any]) -> String {
+        raw.contains("{{") ? evaluateText(raw, context: ctx) : raw
+    }
+
+    /// A yaml menu list (`menu:` or `context_menu:`) evaluated NOW in `ctx`.
+    static func evaluateMenu(_ raw: [Any], ctx: [String: Any]) -> [LayersMenuItem] {
+        var out: [LayersMenuItem] = []
+        for entry in raw {
+            if let s = entry as? String {
+                if s == "separator" { out.append(.separator) }
+                continue
+            }
+            guard let obj = entry as? [String: Any] else { continue }
+            let label = menuText(obj["label"] as? String ?? "", ctx: ctx)
+            let action = menuText(obj["action"] as? String ?? "", ctx: ctx)
+            var enabled = !action.isEmpty
+            if let cond = obj["enabled_when"] as? String, !cond.isEmpty {
+                enabled = enabled && evaluate(cond, context: ctx).toBool()
+            }
+            out.append(LayersMenuItem(label: label, action: action,
+                                      params: menuParams(obj["params"] as? [String: Any] ?? [:], ctx: ctx),
+                                      enabled: enabled, isSeparator: false))
+        }
+        return out
+    }
+
+    /// The panel menu's items as they read NOW (labels and enabled state are
+    /// evaluated when the menu opens; the three toggle-all labels read
+    /// `any_layer_visible / _preview / _unlocked` at that moment).
+    public static func panelMenuItems(model: Model) -> [LayersMenuItem] {
+        guard let ws = WorkspaceData.load() else { return [] }
+        ensureLayersScope(model)
+        return evaluateMenu(ws.panelMenuRaw(panelContentId), ctx: treeEvalContext(model: model))
+    }
+
+    /// The panel's menu button: opens `menu:` in order.
+    @discardableResult
+    public static func treeOpenPanelMenu(model: Model, shell: LayersTreeShell) -> LayersOpenMenu {
+        let menu = LayersOpenMenu(kind: .panel, row: nil, items: panelMenuItems(model: model))
+        shell.openMenu = menu
+        return menu
+    }
+
+    /// The context menu's items for the row `node`, evaluated NOW with `node`
+    /// bound.
+    static func contextMenuItems(node: [String: Any], model: Model) -> [LayersMenuItem] {
+        guard let raw = treeSpec()?["context_menu"] as? [Any] else { return [] }
+        var ctx = treeEvalContext(model: model)
+        ctx["node"] = node
+        return evaluateMenu(raw, ctx: ctx)
+    }
+
+    /// A secondary press (right-click, Control-click) on the row at `path`
+    /// (S3 §1): the tree takes the keyboard; a row that is not panel-selected
+    /// becomes the SOLE panel selection first (layers.yaml §Panel Selection),
+    /// THEN `context_menu:` opens with `node` bound to that row. Nothing else
+    /// is dispatched. A press below the last row (`path` nil, or naming no
+    /// drawn row) opens nothing (DECISION S3-2). Returns the menu opened.
+    @discardableResult
+    public static func treeSecondaryPress(path: [Int]?, model: Model,
+                                          shell: LayersTreeShell) -> LayersOpenMenu? {
+        shell.focusTree()
+        shell.openMenu = nil
+        guard let path,
+              treeRows(model: model).contains(where: { ($0["path"] as? [Int]) == path })
+        else { return nil }
+        if !layersPanelSelection(model: model).contains(path) {
+            runTreeAction("layers_panel_select", params: ["path": path, "modifier": "none"], model: model)
+        }
+        // The row as it reads after the selection (panel_selected now true).
+        guard let node = treeRows(model: model).first(where: { ($0["path"] as? [Int]) == path })
+        else { return nil }
+        let menu = LayersOpenMenu(kind: .context, row: path,
+                                  items: contextMenuItems(node: node, model: model))
+        shell.openMenu = menu
+        return menu
+    }
+
+    /// A press on item `index` of the open menu. The menu closes; a separator
+    /// or a disabled item claims the press without acting (DECISION S3-1).
+    /// `delete_layer_selection` takes the delete route (its orphan
+    /// intercept). Returns the action raised.
+    @discardableResult
+    public static func treeMenuChoose(index: Int, model: Model, shell: LayersTreeShell,
+                                      confirm: ((Int) -> Bool)? = nil) -> String? {
+        guard let menu = shell.openMenu else { return nil }
+        shell.openMenu = nil
+        guard menu.items.indices.contains(index) else { return nil }
+        let item = menu.items[index]
+        guard !item.isSeparator, item.enabled, !item.action.isEmpty else { return nil }
+        if item.action == "delete_layer_selection" {
+            return treeDeleteSelection(model: model, shell: shell, confirm: confirm)
+        }
+        runPanelAct(item.action, params: item.params, model: model, shell: shell)
+        return item.action
+    }
+
+    /// A press on the open menu's FIRST item raising `action` (an input
+    /// script names a menu item by its action). Extra `params` are laid over
+    /// the item's own. nil when no item raises it, or it is disabled.
+    @discardableResult
+    public static func treeMenuChoose(action: String, params: [String: Any] = [:],
+                                      model: Model, shell: LayersTreeShell,
+                                      confirm: ((Int) -> Bool)? = nil) -> String? {
+        guard let menu = shell.openMenu,
+              let idx = menu.items.firstIndex(where: { !$0.isSeparator && $0.action == action })
+        else {
+            shell.openMenu = nil
+            return nil
+        }
+        if !params.isEmpty {
+            let it = menu.items[idx]
+            var merged = it.params
+            for (k, v) in params where merged[k] == nil { merged[k] = v }
+            var items = menu.items
+            items[idx] = LayersMenuItem(label: it.label, action: it.action, params: merged,
+                                        enabled: it.enabled, isSeparator: false)
+            shell.openMenu = LayersOpenMenu(kind: menu.kind, row: menu.row, items: items)
+        }
+        return treeMenuChoose(index: idx, model: model, shell: shell, confirm: confirm)
+    }
+
+    /// A press outside the open menu, or Escape: the menu closes, nothing runs.
+    public static func treeMenuDismiss(shell: LayersTreeShell) {
+        shell.openMenu = nil
+    }
+
+    /// A panel-menu command from the app's hamburger menu (``dispatch``): the
+    /// item's `enabled_when` gates it (a disabled item claims its press without
+    /// acting, S3-1), then the action runs and the panel redraws.
+    public static func runPanelMenuCommand(_ cmd: String, model: Model) {
+        let ctx = treeEvalContext(model: model)
+        guard panelMenuIsEnabled(panelContentId, cmd, ctx: ctx) else { return }
+        runTreeAction(cmd, params: [:], model: model)
+    }
+
+    // MARK: Escape (S3 §1)
+
+    /// One Escape: an open menu closes → else an active rename cancels (S2)
+    /// → else isolation pops one level (the `keyboard:` Escape row's
+    /// `exit_isolation_mode`) → else nothing. Exactly one of these.
+    @discardableResult
+    public static func treeEscape(model: Model, shell: LayersTreeShell?) -> LayersEscapeOutcome {
+        if let sh = shell, sh.openMenu != nil {
+            sh.openMenu = nil
+            return .closedMenu
+        }
+        if layersRenamingPath(model: model) != nil {
+            renameFieldKey("Escape", text: "", model: model, shell: shell)
+            return .cancelledRename
+        }
+        if !model.layersIsolationStack.isEmpty, actionEnabled("exit_isolation_mode", model: model) {
+            runPanelAct("exit_isolation_mode", model: model, shell: shell)
+            return .exitedIsolationLevel
+        }
+        return .nothing
+    }
+
+    // MARK: Delete (S3 §1, G14)
+
+    /// Delete / Backspace with key focus in the tree, and the context menu's
+    /// Delete Selection: `delete_layer_selection` on the PANEL selection. When
+    /// deleting it would orphan live instances, `delete_layer_orphan_confirm`
+    /// opens instead, with the count. With a `confirm` (the Mac presents the
+    /// dialog as its warn-then-orphan alert, as ``JasCommands`` does for the
+    /// canvas delete) the store dialog is answered there: OK runs
+    /// `delete_layer_orphan_confirm_ok`, Cancel nothing. Without one the dialog
+    /// stays open in the store for its own buttons. Disabled (nothing
+    /// selected): nothing. Returns the action raised, or the dialog's id.
+    @discardableResult
+    public static func treeDeleteSelection(model: Model, shell: LayersTreeShell? = nil,
+                                           confirm: ((Int) -> Bool)? = nil) -> String? {
+        ensureLayersScope(model)
+        guard actionEnabled("delete_layer_selection", model: model) else { return nil }
+        let selection = layersPanelSelection(model: model)
+        let orphans = DependencyIndex.orphanedReferences(model.document, selection)
+        if orphans.isEmpty {
+            runPanelAct("delete_layer_selection", model: model, shell: shell)
+            return "delete_layer_selection"
+        }
+        openOrphanConfirm(count: orphans.count, model: model)
+        guard let confirm else { return "delete_layer_orphan_confirm" }
+        model.stateStore.closeDialog()
+        guard confirm(orphans.count) else { return nil }
+        runPanelAct("delete_layer_orphan_confirm_ok", model: model, shell: shell)
+        return "delete_layer_orphan_confirm_ok"
+    }
+
+    /// Open `delete_layer_orphan_confirm` in the store with `count`, through
+    /// the generic `open_dialog` effect (the dialog is the generic renderer's).
+    private static func openOrphanConfirm(count: Int, model: Model) {
+        guard let ws = WorkspaceData.load() else { return }
+        let effects: [Any] = [["open_dialog": ["id": "delete_layer_orphan_confirm",
+                                               "params": ["count": "orphan_count"]]]]
+        runEffects(effects, ctx: ["orphan_count": count], store: model.stateStore,
+                   actions: ws.data["actions"] as? [String: Any],
+                   dialogs: ws.data["dialogs"] as? [String: Any])
+        model.panelStateVersion &+= 1
+    }
+
+    // MARK: Isolation (S3 §1)
+
+    /// The isolation stack (paths, outermost first). The root is the TOP entry.
+    public static func treeIsolationStack(model: Model) -> [[Int]] {
+        model.layersIsolationStack
+    }
+
+    /// The breadcrumb's segments, outermost first: the name of the element at
+    /// each level's path (its `<Type>` label when unnamed), read through the
+    /// yaml's own foreach source and segment template (`tree_rows_at`). A
+    /// level whose path has no row draws no segment. `levelIndex` is what a
+    /// click on the segment passes (`level._index + 1`: segment n keeps n
+    /// levels).
+    public static func treeBreadcrumb(model: Model) -> [(label: String, levelIndex: Int)] {
+        let ctx = treeEvalContext(model: model)
+        guard case .list(let levels) = evaluate(
+            "tree_rows_at(active_document.element_tree, panel.isolation_stack)", context: ctx)
+        else { return [] }
+        let template = (panelWidget("lp_breadcrumb_segment")?["content"] as? String)
+            ?? "{{if level.name != '' then level.name else '<' + level.type_label + '>'}}"
+        var out: [(label: String, levelIndex: Int)] = []
+        for (i, level) in levels.enumerated() {
+            var c = ctx
+            c["level"] = level.value
+            out.append((label: menuText(template, ctx: c), levelIndex: i + 1))
+        }
+        return out
+    }
+
+    /// A click on breadcrumb segment `levelIndex` (keeps that many levels), or
+    /// on the chevron (`levelIndex` 0: exits isolation entirely):
+    /// `exit_isolation_to_level`.
+    @discardableResult
+    public static func treeBreadcrumbClick(levelIndex: Int, model: Model,
+                                           shell: LayersTreeShell? = nil) -> String? {
+        guard actionEnabled("exit_isolation_to_level", model: model) else { return nil }
+        runPanelAct("exit_isolation_to_level", params: ["level_index": levelIndex],
+                    model: model, shell: shell)
+        return "exit_isolation_to_level"
+    }
+
+    /// The canvas while isolated (S3 §1): the document split in two, the
+    /// BACKGROUND (everything but the isolated container, drawn at 10 %) and
+    /// the FOREGROUND (the isolated container alone, its ancestors kept for
+    /// their transforms and visibility, drawn at full opacity). Only the
+    /// visibility of the elements left out is changed, in these copies; the
+    /// document is never written. nil when `root` names no element.
+    public static func isolationCanvasLayers(_ doc: Document, root: [Int])
+        -> (background: [Layer], foreground: [Layer])? {
+        guard !root.isEmpty, root[0] >= 0, root[0] < doc.layers.count,
+              let rootElem = doc.tryGetElement(root) else { return nil }
+        // Background: the isolated container hidden.
+        let background: Document
+        if root.count == 1 {
+            var ls = doc.layers
+            ls[root[0]] = ls[root[0]].withVisibility(.invisible)
+            background = doc.replacing(layers: ls)
+        } else {
+            background = doc.replaceElement(root, with: rootElem.withVisibility(.invisible))
+        }
+        // Foreground: every sibling off the path to the container hidden.
+        var fg = doc
+        if root.count > 1 {
+            for d in 1..<root.count {
+                let parent = Array(root.prefix(d))
+                for (i, child) in childrenOfPath(fg, parent).enumerated() where i != root[d] {
+                    fg = fg.replaceElement(parent + [i], with: child.withVisibility(.invisible))
+                }
+            }
+        }
+        var ls = fg.layers
+        for i in ls.indices where i != root[0] { ls[i] = ls[i].withVisibility(.invisible) }
+        return (background.layers, ls)
     }
 }

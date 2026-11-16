@@ -28,6 +28,66 @@ import Foundation
         return cases
     }
 
+    private static func rowsAtCases() -> [[String: Any]] {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let url = root.appendingPathComponent("test_fixtures").appendingPathComponent("layers/element_tree.json")
+        guard let data = try? Data(contentsOf: url),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let cases = json["rows_at_cases"] as? [[String: Any]] else { return [] }
+        return cases
+    }
+
+    /// `tree_rows_at(element_tree, paths)`: the row of each path, in the
+    /// order of `paths`, a missing path skipped (the fixture's `rows_at_cases`;
+    /// SCHEMA.md). Paths are given both as plain lists and as path markers,
+    /// the form `panel.isolation_stack` carries.
+    @Test func treeRowsAtMatchesTheSharedFixture() throws {
+        let cases = Self.rowsAtCases()
+        #expect(cases.count >= 5, "the fixture is not vacuous")
+        let rows = Self.cases().first?["expected"] as? [[String: Any]] ?? []
+        #expect(!rows.isEmpty)
+        var compared = 0
+        for c in cases {
+            let paths = c["paths"] as? [[Int]] ?? []
+            let want = c["expected"] as? [[String: Any]] ?? []
+            for form in [paths.map { $0 as Any }, paths.map { ["__path__": $0] as Any }] {
+                let ctx: [String: Any] = ["active_document": ["element_tree": rows],
+                                          "panel": ["isolation_stack": form]]
+                let got = evaluate("tree_rows_at(active_document.element_tree, panel.isolation_stack)",
+                                   context: ctx)
+                guard case .list(let items) = got else {
+                    Issue.record("\(c["name"] ?? ""): not a list: \(got)"); continue
+                }
+                #expect(items.count == want.count, "\(c["name"] ?? "")")
+                for (g, w) in zip(items, want) {
+                    let gp = (g.value as? [String: Any])?["path"] as? [Int]
+                    #expect(gp == w["path"] as? [Int], "\(c["name"] ?? "")")
+                    #expect((g.value as? [String: Any])?["name"] as? String == w["name"] as? String)
+                    compared += 1
+                }
+            }
+        }
+        #expect(compared >= 10)
+    }
+
+    /// The edge cases SCHEMA.md states: not two arguments or rows not a list
+    /// is null; paths not a list is the empty list; a PATH value works too.
+    @Test func treeRowsAtEdgeCases() {
+        let rows = Self.cases().first?["expected"] as? [[String: Any]] ?? []
+        let ctx: [String: Any] = ["rows": rows, "n": 3]
+        #expect(evaluate("tree_rows_at(rows)", context: ctx) == .null)
+        #expect(evaluate("tree_rows_at(rows, [], [])", context: ctx) == .null)
+        #expect(evaluate("tree_rows_at(n, [])", context: ctx) == .null)
+        #expect(evaluate("tree_rows_at(rows, n)", context: ctx) == .list([]))
+        guard case .list(let one) = evaluate("tree_rows_at(rows, [path(0)])", context: ctx) else {
+            Issue.record("not a list"); return
+        }
+        #expect(one.count == 1)
+        #expect((one.first?.value as? [String: Any])?["path"] as? [Int] == [0])
+    }
+
     @Test func elementTreeRowsMatchTheSharedFixture() throws {
         let cases = Self.cases()
         #expect(cases.count >= 2, "the fixture is not vacuous")
