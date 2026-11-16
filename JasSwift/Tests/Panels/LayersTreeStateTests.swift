@@ -127,12 +127,16 @@ import Foundation
         #expect(Self.panelSel(m) == [[0], [0, 2], [0, 2, 0], [0, 1]], "R-7: right after the group's row")
     }
 
-    @Test func secondPressOfADoubleClickDoesNothing() {
+    /// S1 raised nothing on a second press; S2 opens the rename field from the
+    /// NAME (LayersTreeEditTests). Outside the name the second press is the
+    /// isolation slice's and still raises nothing.
+    @Test func secondPressOutsideTheNameDoesNothing() {
         let m = Self.fixture()
         Self.clickName(m, [0])
-        let raised = LayersPanel.treePress(region: .name, path: [1], mods: .command, clickCount: 2, model: m)
+        let raised = LayersPanel.treePress(region: .spacer, path: [0], clickCount: 2, model: m)
         #expect(raised == nil)
         #expect(Self.panelSel(m) == [[0]])
+        #expect(LayersPanel.treeRenamingPath(model: m) == nil)
     }
 
     // MARK: - Element selection

@@ -39,6 +39,22 @@ struct PanelWidgetEvents {
         }
     }
 
+    /// Deliver a text field's `input` / `keydown` / `blur` (WIDGET_EVENTS.md,
+    /// "Typing in a text field"): `text` is the field's whole text. Only that
+    /// event's own behaviors run; no bind is written. The Layers search field
+    /// raises `input` on every keystroke (LAYERS-S2 §2).
+    @discardableResult
+    func textEntry(_ widget: [String: Any], event: String, text: String,
+                   key: String? = nil) -> WidgetEvent.Result {
+        run { host, panel, ws in
+            WidgetEvent.textEntry(widget: widget, event: event, store: model.stateStore,
+                                  panel: panel, text: text, key: key,
+                                  actions: ws?.actions(), dialogs: ws?.dialogs(),
+                                  platformEffects: platformEffects, model: model,
+                                  host: host)
+        }
+    }
+
     /// Press a boolean widget.
     @discardableResult
     func press(_ widget: [String: Any]) -> WidgetEvent.Result {

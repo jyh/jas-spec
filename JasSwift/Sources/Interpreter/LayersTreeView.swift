@@ -35,6 +35,7 @@ struct LayersTreeView: View {
         let template = (element["do"] as? [String: Any]) ?? [:]
         let baseCtx = rowBaseContext()
         let selection = model.document.selection.map(\.path)
+        let renameInitial = LayersPanel.renameFieldInitialText(model: model)
         GeometryReader { geo in
             ScrollViewReader { proxy in
                 ScrollView(.vertical, showsIndicators: true) {
@@ -43,7 +44,19 @@ struct LayersTreeView: View {
                             let path = node["path"] as? [Int] ?? []
                             LayersTreeRow(node: node, template: template, baseCtx: baseCtx,
                                           theme: theme,
-                                          onPress: { region in press(region, path) })
+                                          renameInitial: renameInitial,
+                                          onPress: { region in press(region, path) },
+                                          onRenameKey: { key, text in
+                                              LayersPanel.renameFieldKey(key, text: text, model: model,
+                                                                         shell: shell) != nil
+                                          },
+                                          onRenameBlur: { text in
+                                              LayersPanel.renameFieldBlur(text: text, model: model)
+                                          },
+                                          onDragChanged: { region, location in
+                                              dragChanged(region, path, location)
+                                          },
+                                          onDragEnded: { dragEnded() })
                                 .id(layersRowKey(path))
                         }
                         // Below the last row: takes focus, selects nothing
@@ -54,6 +67,11 @@ struct LayersTreeView: View {
                             .contentShape(Rectangle())
                             .onTapGesture { LayersPanel.treePressBelowRows(shell: shell) }
                     }
+                    .coordinateSpace(name: "lp_tree_content")
+                    // The drop indicator (spec §3): a line at the insertion
+                    // point indented to the target depth, or the row's outline
+                    // for "into"; none for a refused drop.
+                    .overlay(alignment: .topLeading) { dropIndicator(rows) }
                     .background(GeometryReader { g in
                         SwiftUI.Color.clear.preference(
                             key: LayersTreeOffsetKey.self,
@@ -102,8 +120,94 @@ struct LayersTreeView: View {
                               clickCount: clicks, model: model, shell: shell)
     }
 
+    // MARK: - Drag (S2 §3)
+
+    private static func nowMs() -> Double { ProcessInfo.processInfo.systemUptime * 1000 }
+
+    /// The drop point under `location` (content coordinates): the row it is
+    /// over and the zone of that row (DECISION S2-9); nil off the rows.
+    private func dropPoint(at location: CGPoint) -> LayersDropPoint? {
+        let rows = LayersPanel.treeRows(model: model)
+        guard location.y >= 0 else { return nil }
+        let idx = Int(location.y / layersRowHeight)
+        guard idx >= 0, idx < rows.count, let path = rows[idx]["path"] as? [Int] else { return nil }
+        let fraction = Double((location.y - CGFloat(idx) * layersRowHeight) / layersRowHeight)
+        let zone = LayersPanel.dropZone(fraction: fraction,
+                                        isContainer: rows[idx]["is_container"] as? Bool ?? false)
+        return LayersDropPoint(row: path, zone: zone)
+    }
+
+    /// The pointer moved with the button down past the drag threshold
+    /// (DECISION S2-7, the gesture's minimum distance): the first move starts
+    /// the drag, every move updates the drop point; a timer re-checks the
+    /// 500 ms hover expansion while the pointer rests.
+    private func dragChanged(_ region: LayersRowRegion, _ path: [Int], _ location: CGPoint) {
+        if !shell.dragGestureOpen {
+            shell.dragGestureOpen = true
+            LayersPanel.treeDragStart(region: region, path: path, model: model, shell: shell,
+                                      nowMs: Self.nowMs())
+        }
+        guard shell.drag != nil else { return }
+        LayersPanel.treeDragMove(to: dropPoint(at: location), nowMs: Self.nowMs(),
+                                 model: model, shell: shell)
+        if let d = shell.drag, d.point != nil, !d.valid {
+            NSCursor.operationNotAllowed.set()
+        } else {
+            NSCursor.arrow.set()
+        }
+        let delay = LayersPanel.hoverExpandMs / 1000 + 0.02
+        let sh = shell
+        let m = model
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            LayersPanel.treeDragHoverTick(nowMs: LayersTreeView.nowMs(), model: m, shell: sh)
+        }
+    }
+
+    private func dragEnded() {
+        shell.dragGestureOpen = false
+        NSCursor.arrow.set()
+        LayersPanel.treeDragEnd(model: model, shell: shell)
+    }
+
+    /// The indicator for the current drop, drawn over the rows.
+    @ViewBuilder
+    private func dropIndicator(_ rows: [[String: Any]]) -> some View {
+        if let d = shell.drag, d.valid, let point = d.point,
+           let idx = rows.firstIndex(where: { ($0["path"] as? [Int]) == point.row }) {
+            let depth = CGFloat(rows[idx]["depth"] as? Int ?? 0)
+            let accent = SwiftUI.Color.accentColor
+            switch point.zone {
+            case .into:
+                Rectangle()
+                    .stroke(accent, lineWidth: 2)
+                    .frame(height: layersRowHeight)
+                    .frame(maxWidth: .infinity)
+                    .offset(y: CGFloat(idx) * layersRowHeight)
+                    .allowsHitTesting(false)
+            case .before, .after:
+                // "after" a row is below its element in z, so below the rows
+                // of everything inside it too.
+                let lineRow: Int = {
+                    guard point.zone == .after else { return idx }
+                    var end = idx + 1
+                    while end < rows.count, let p = rows[end]["path"] as? [Int],
+                          p.count > point.row.count, p.starts(with: point.row) { end += 1 }
+                    return end
+                }()
+                Rectangle()
+                    .fill(accent)
+                    .frame(height: 2)
+                    .frame(maxWidth: .infinity)
+                    .padding(.leading, 4 + depth * 16)
+                    .offset(y: CGFloat(lineRow) * layersRowHeight - 1)
+                    .allowsHitTesting(false)
+            }
+        }
+    }
+
     private func handleKey(_ event: NSEvent, proxy: ScrollViewProxy, height: CGFloat) -> Bool {
-        let key = canonicalKeyName(event)
+        // F2 arrives as a function-key character; the keyboard table names it.
+        let key = event.keyCode == 120 ? "F2" : canonicalKeyName(event)
         let flags = event.modifierFlags
         let mods = KeyMods(shift: flags.contains(.shift), ctrl: flags.contains(.control),
                            alt: flags.contains(.option), cmd: flags.contains(.command))
@@ -133,13 +237,40 @@ struct LayersTreeView: View {
 }
 
 /// One row, laid out as the template: spacer · eye · lock · twirl or leaf gap
-/// · preview · name · select square.
+/// · preview · name (or, while renaming, the rename field) · select square.
+/// The regions that panel-select also start a drag (S2 §3).
 private struct LayersTreeRow: View {
     let node: [String: Any]
     let template: [String: Any]
     let baseCtx: [String: Any]
     let theme: Theme?
+    let renameInitial: String
     let onPress: (LayersRowRegion) -> Void
+    let onRenameKey: (String, String) -> Bool
+    let onRenameBlur: (String) -> Void
+    let onDragChanged: (LayersRowRegion, CGPoint) -> Void
+    let onDragEnded: () -> Void
+
+    /// The drag a press on `region` may become: past the threshold
+    /// (DECISION S2-7), in the tree's content coordinates.
+    private func dragGesture(_ region: LayersRowRegion) -> some Gesture {
+        DragGesture(minimumDistance: CGFloat(LayersPanel.dragThreshold),
+                    coordinateSpace: .named("lp_tree_content"))
+            .onChanged { v in onDragChanged(region, v.location) }
+            .onEnded { _ in onDragEnded() }
+    }
+
+    /// `lp_name_edit` shows instead of `lp_name` on the renamed row
+    /// (`panel.renaming_element == node.path`, compared by value: the row's
+    /// `renaming` from `tree_visible_rows`).
+    private var renaming: Bool { node["renaming"] as? Bool ?? false }
+
+    /// The row's `opacity` bind: an ancestor-only search row is dimmed.
+    private var rowOpacity: Double {
+        guard let expr = (template["bind"] as? [String: Any])?["opacity"] as? String else { return 1 }
+        if case .number(let n) = evaluate(expr, context: ctx) { return n }
+        return 1
+    }
 
     private var ctx: [String: Any] {
         var c = baseCtx
@@ -166,6 +297,7 @@ private struct LayersTreeRow: View {
                 .frame(width: CGFloat(depth * 16), height: layersRowHeight)
                 .contentShape(Rectangle())
                 .onTapGesture { onPress(.spacer) }
+                .gesture(dragGesture(.spacer))
             iconButton(iconName("lp_eye"), id: "lp_eye", summary: "Visibility") { onPress(.eye) }
             iconButton(iconName("lp_lock"), id: "lp_lock", summary: "Lock") { onPress(.lock) }
             if isContainer {
@@ -175,6 +307,7 @@ private struct LayersTreeRow: View {
                     .frame(width: 16, height: 16)
                     .contentShape(Rectangle())
                     .onTapGesture { onPress(.leafGap) }
+                    .gesture(dragGesture(.leafGap))
             }
             // Best-effort thumbnail (spec §4): a white 24-square (DECISION S1-7).
             Rectangle()
@@ -183,18 +316,29 @@ private struct LayersTreeRow: View {
                 .frame(width: 24, height: 24)
                 .contentShape(Rectangle())
                 .onTapGesture { onPress(.preview) }
+                .gesture(dragGesture(.preview))
                 .accessibilityIdentifier("lp_preview")
-            SwiftUI.Text(nameText)
-                .font(.system(size: 11))
-                .foregroundColor(SwiftUI.Color(nsColor: tint))
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
-                .onTapGesture { onPress(.name) }
-                .accessibilityIdentifier("lp_name")
-                .accessibilityAddTraits(.isButton)
-                .accessibilityAction { onPress(.name) }
+            if renaming {
+                // The rename field has the keyboard (DECISION S2-1); it opens
+                // with the current name, all selected (S2-2).
+                LayersRenameField(initial: renameInitial, onKey: onRenameKey, onBlur: onRenameBlur)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 18)
+                    .accessibilityIdentifier("lp_name_edit")
+            } else {
+                SwiftUI.Text(nameText)
+                    .font(.system(size: 11))
+                    .foregroundColor(SwiftUI.Color(nsColor: tint))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .onTapGesture { onPress(.name) }
+                    .gesture(dragGesture(.name))
+                    .accessibilityIdentifier("lp_name")
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityAction { onPress(.name) }
+            }
             Button(action: { onPress(.select) }) {
                 Rectangle()
                     .fill(selectFill)
@@ -207,6 +351,7 @@ private struct LayersTreeRow: View {
         .padding(.horizontal, 4)
         .frame(height: layersRowHeight)
         .background(rowBackground)
+        .opacity(rowOpacity)
         .contentShape(Rectangle())
         .onTapGesture { onPress(.spacer) }
         .accessibilityElement(children: .contain)
@@ -282,6 +427,75 @@ private struct LayersTreeRow: View {
         case "twirl_open": return "chevron.down"
         case "twirl_closed": return "chevron.right"
         default: return "questionmark"
+        }
+    }
+}
+
+/// The inline rename field (`lp_name_edit`, S2 §1). It takes the keyboard when
+/// it opens, with all its text selected; Enter and Escape are its `keydown`
+/// events (`confirm_rename` / `cancel_rename`), every other key edits the text.
+/// Losing focus — a press outside it, the panel going away — is its `blur`,
+/// which confirms while the row is still being renamed.
+private struct LayersRenameField: NSViewRepresentable {
+    let initial: String
+    let onKey: (String, String) -> Bool
+    let onBlur: (String) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeNSView(context: Context) -> NSTextField {
+        let field = NSTextField(string: initial)
+        field.font = .systemFont(ofSize: 11)
+        field.isBordered = true
+        field.isBezeled = true
+        field.bezelStyle = .squareBezel
+        field.lineBreakMode = .byClipping
+        field.usesSingleLineMode = true
+        field.delegate = context.coordinator
+        DispatchQueue.main.async {
+            guard let window = field.window else { return }
+            window.makeFirstResponder(field)
+            field.currentEditor()?.selectAll(nil)
+        }
+        return field
+    }
+
+    func updateNSView(_ nsView: NSTextField, context: Context) {
+        context.coordinator.parent = self
+    }
+
+    static func dismantleNSView(_ nsView: NSTextField, coordinator: Coordinator) {
+        coordinator.endOnce { coordinator.parent.onBlur(nsView.stringValue) }
+    }
+
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        var parent: LayersRenameField
+        private var ended = false
+
+        init(_ parent: LayersRenameField) { self.parent = parent }
+
+        func endOnce(_ body: () -> Void) {
+            guard !ended else { return }
+            ended = true
+            body()
+        }
+
+        func control(_ control: NSControl, textView: NSTextView,
+                     doCommandBy selector: Selector) -> Bool {
+            let key: String
+            switch selector {
+            case #selector(NSResponder.insertNewline(_:)): key = "Enter"
+            case #selector(NSResponder.cancelOperation(_:)): key = "Escape"
+            default: return false
+            }
+            let text = textView.string
+            endOnce { _ = parent.onKey(key, text) }
+            return true
+        }
+
+        func controlTextDidEndEditing(_ obj: Notification) {
+            let text = (obj.object as? NSTextField)?.stringValue ?? ""
+            endOnce { parent.onBlur(text) }
         }
     }
 }
