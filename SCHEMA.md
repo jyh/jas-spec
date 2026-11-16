@@ -897,12 +897,32 @@ that foreach's expansion: one `do` per row of
 the rows under a collapsed container and marks `collapsed`, `panel_selected`
 and `renaming` (paths; `test_fixtures/layers/element_tree.json`).
 
+`tree_rows_at(rows, paths)` returns the rows of `rows` (an `element_tree`
+list) whose `path` equals one of `paths`, **in the order of `paths`, not the
+order of the tree**. A path with no row is skipped. Each path may be a list or
+a path marker. If `rows` is
+not a list, or the call does not have exactly two arguments, the result is
+`null`. If `paths` is not a list, the result is the empty list. Layers'
+isolation breadcrumb (`lp_breadcrumb`) uses it as its foreach source over
+`panel.isolation_stack`, so each segment draws the row of its own level,
+outermost first (`rows_at_cases` in `test_fixtures/layers/element_tree.json`).
+
+`as_path(v)` turns a row's `node.path` (a list) into a PATH value. It accepts
+a PATH, a list of non-negative whole numbers, or a path marker. It returns
+`null` for anything else, including a list with a negative or fractional
+entry, or a string. The empty list gives the root path, `path()`. A path
+converts to its dotted string with `'' + as_path(p)` (`[1, 0]` reads `1.0`).
+That string is the form `path_from_id` resolves, so it is how a row action
+names its element (the `as_path` cases in
+`test_fixtures/expressions/conformance.json`).
+
 Within `do` (or `row_template`), `behavior`, and `context_menu`, the following
 variables are available for the current row's tree node:
 
 | Variable | Type | Description |
 |---|---|---|
-| `node.id` | string | Unique element ID |
+| `node.path` | list | The element's path (child indices from the document root). **This is what names the element**: an action that resolves a `*_id` with `path_from_id` is passed `'' + as_path(node.path)` |
+| `node.id` | string or null | The element's own `id` field, **null on an element that was never given one**, so it never names the row's element (G6: Options for Layer passed it, and OK on an id-less layer created a new layer) |
 | `node.name` | string | Element name (empty string if unnamed) |
 | `node.type` | string | Element type identifier (e.g., `path`, `layer`) |
 | `node.type_label` | string | Human-readable type name (e.g., `Path`, `Layer`) |
