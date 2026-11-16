@@ -1968,7 +1968,9 @@ actions:
       are removed; the shell converts from row position (the tree draws
       topmost first). No existing op does this: doc.insert_at, doc.delete_at
       and doc.clone_at do not compose into one atomic step that shifts
-      stored paths. Valid only if, for every moved element, the parent is
+      stored paths. Valid only if, for every moved element whose ancestor is
+      not also moved (an element whose ancestor is moved travels inside it,
+      unchecked), the parent is
       not the element or inside it, the parent is not locked (its own flag
       or any ancestor's), a layer goes to the root or a layer and anything
       else to a layer or a group, no search or type filter is active, and

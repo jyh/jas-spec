@@ -158,8 +158,9 @@ description: >
   - Every element must live inside a layer; elements cannot be dragged
     to the root level unless they are layers.
   - When dragging multiple panel-selected elements, all constraints
-    must be satisfied for every element. If any element violates a
-    constraint, the entire drop is rejected.
+    must be satisfied for every element whose ancestor is not also
+    dragged (a selected descendant travels inside its selected ancestor).
+    If any such element violates a constraint, the entire drop is rejected.
   - Locked elements can be dragged (lock protects content, not
     position).
 
