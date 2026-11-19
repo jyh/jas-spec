@@ -1981,8 +1981,8 @@ actions:
       position). After the move the panel selection is the moved elements'
       new paths, and every path stored in the Layers panel's state is
       remapped through the move: all of collapsed_paths (later siblings and
-      their descendants shift too), isolation_stack, solo_path and
-      renaming_element.
+      their descendants shift too), isolation_stack, solo_path, each path
+      in solo_saved (its visibility kept), and renaming_element.
     category: layers
     tier: 3
     params:
