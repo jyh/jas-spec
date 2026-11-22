@@ -405,6 +405,18 @@ func dispatchPanelAction(
         // dispatcher that holds the `doc.*` handlers.
         LayersPanel.dispatchYamlAction(name, model: model)
         return
+    case "exit_isolation_to_level":
+        // The Layers breadcrumb (`lp_breadcrumb_exit_all`, `lp_breadcrumb_segment`):
+        // its `pop: panel.isolation_stack` must pop the MODEL-held stack
+        // (`Model.layersIsolationStack`), which only the Layers dispatcher's
+        // pop handler writes; the generic catalog below would pop the store's
+        // unused copy and leave the panel isolated. Gated by the action's
+        // `enabled_when`, as the tree's own breadcrumb entry point is.
+        let raw = params["level_index"]
+        let level = (raw as? Int) ?? (raw as? NSNumber)?.intValue
+            ?? (raw as? String).flatMap { Int($0) } ?? 0
+        LayersPanel.treeBreadcrumbClick(levelIndex: level, model: model)
+        return
     default:
         break
     }

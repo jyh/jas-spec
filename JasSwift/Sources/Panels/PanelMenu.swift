@@ -405,7 +405,10 @@ func artboardsPanelSelection(model: Model?) -> [String] {
 /// shared panel store, keyed exactly as the panel's YAML state table
 /// declares them. One panel: the layers isolation stack, which the YAML
 /// `list_push` / `list_pop` effects route to `model.layersIsolationStack`.
-private func modelHeldPanelState(_ contentId: String,
+/// Read by the menu context here AND by the panel body's render context
+/// (`buildPanelBodyContext`), whose `lp_breadcrumb` `visible` bind reads
+/// `panel.isolation_stack`.
+func modelHeldPanelState(_ contentId: String,
                                  model: Model?) -> [String: Any] {
     switch contentId {
     case "layers_panel_content":

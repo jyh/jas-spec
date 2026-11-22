@@ -671,6 +671,13 @@ func buildPanelBodyContext(ws: WorkspaceData, model: Model?, contentId: String,
     } else {
         panelMap = ws.panelStateDefaults(contentId)
     }
+    // The panel state this app keeps on the Model rather than in the store —
+    // the Layers isolation stack, which enter/exit_isolation_mode write to
+    // `model.layersIsolationStack` — overlaid as the menu context does
+    // (`panelMenuContext`). Without it `panel.isolation_stack` here was the
+    // store's never-written default `[]`, so `lp_breadcrumb`'s
+    // `visible: panel.isolation_stack.length > 0` was false while isolated.
+    for (k, v) in modelHeldPanelState(contentId, model: model) { panelMap[k] = v }
     // Selection-driven overrides: when a Text / TextPath is
     // selected, the Character panel reflects its attributes rather
     // than the stored panel defaults. Mirrors the Rust dock

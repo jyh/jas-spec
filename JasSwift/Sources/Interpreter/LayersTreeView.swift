@@ -48,6 +48,7 @@ struct LayersTreeView: View {
                             LayersTreeRow(node: node, template: template, baseCtx: baseCtx,
                                           theme: theme,
                                           renameInitial: renameInitial,
+                                          preview: LayersPanel.treePreviewImage(model: model, path: path),
                                           onPress: { region in press(region, path) },
                                           onRenameKey: { key, text in
                                               LayersPanel.renameFieldKey(key, text: text, model: model,
@@ -296,6 +297,8 @@ private struct LayersTreeRow: View {
     let baseCtx: [String: Any]
     let theme: Theme?
     let renameInitial: String
+    /// The row's `lp_preview` thumbnail; nil draws the blank square.
+    let preview: CGImage?
     let onPress: (LayersRowRegion) -> Void
     let onRenameKey: (String, String) -> Bool
     let onRenameBlur: (String) -> Void
@@ -360,9 +363,18 @@ private struct LayersTreeRow: View {
                     .onTapGesture { onPress(.leafGap) }
                     .gesture(dragGesture(.leafGap))
             }
-            // Best-effort thumbnail (spec §4): a white 24-square (DECISION S1-7).
+            // Best-effort thumbnail (spec §4): the element rasterized to fit
+            // on a white 24-square (DECISION S1-7); blank for an empty
+            // container (``LayersPanel/elementPreviewImage(_:pixelScale:)``).
             Rectangle()
                 .fill(SwiftUI.Color.white)
+                .overlay {
+                    if let img = preview {
+                        Image(decorative: img, scale: CGFloat(img.width) / CGFloat(LayersPanel.previewSide))
+                            .resizable()
+                            .interpolation(.high)
+                    }
+                }
                 .overlay(Rectangle().stroke(SwiftUI.Color.gray.opacity(0.6), lineWidth: 1))
                 .frame(width: 24, height: 24)
                 .contentShape(Rectangle())
